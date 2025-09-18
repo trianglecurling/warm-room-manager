@@ -110,7 +110,6 @@ export class OBSManager {
 			'--multi', // don't warn when launching multiple instances
 			'--disable-shutdown-check',
 			'--disable-updater',
-			'--minimize-to-tray',
 			'--startvirtualcam'
 		], {
 			cwd: obsDir, // Set working directory to OBS installation directory
