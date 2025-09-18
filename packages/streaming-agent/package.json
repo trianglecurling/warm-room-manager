@@ -1,0 +1,23 @@
+{
+	"name": "@warm-room-manager/streaming-agent",
+	"version": "0.1.0",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"license": "MIT",
+	"scripts": {
+		"build": "tsc -b",
+		"dev": "tsx watch src/index.ts",
+		"start": "node dist/index.js"
+	},
+	"dependencies": {
+		"@warm-room-manager/shared": "0.1.0",
+		"dotenv": "17.2.1",
+		"obs-websocket-js": "^5.0.6",
+		"ws": "8.18.3"
+	},
+	"devDependencies": {
+		"@types/ws": "8.18.1",
+		"tsx": "4.20.4",
+		"typescript": "5.9.2"
+	}
+}

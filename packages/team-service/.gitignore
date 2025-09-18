@@ -1,0 +1,8 @@
+.env
+temp/
+logs/
+cache/
+dist/
+data/
+*.db
+node_modules/

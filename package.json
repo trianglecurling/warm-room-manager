@@ -1,0 +1,22 @@
+{
+	"name": "warm-room-manager",
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"build": "tsc -b packages/shared packages/streaming-orchestrator packages/streaming-agent packages/monitor-service packages/scraper-service packages/team-service && npm --workspace packages/wrmm run build",
+		"dev:shared": "tsc -b -w packages/shared",
+		"dev:streaming-orchestrator": "npm --workspace packages/streaming-orchestrator run dev",
+		"dev:streaming-agent": "npm --workspace packages/streaming-agent run dev",
+		"dev:monitor-service": "npm --workspace packages/monitor-service run dev",
+		"dev:scraper-service": "npm --workspace packages/scraper-service run dev",
+		"dev:team-service": "npm --workspace packages/team-service run dev",
+		"dev:wrmm": "npm --workspace packages/wrmm run dev",
+		"dev": "concurrently -n shared,orchestrator,monitor,scraper,team,wrmm -c green,blue,yellow,cyan,red,white \"npm:dev:shared\" \"npm:dev:streaming-orchestrator\" \"npm:dev:monitor-service\" \"npm:dev:scraper-service\" \"npm:dev:team-service\" \"npm:dev:wrmm\""
+	},
+	"devDependencies": {
+		"concurrently": "9.2.0",
+		"prettier": "3.6.2",
+		"typescript": "5.9.2"
+	}
+}

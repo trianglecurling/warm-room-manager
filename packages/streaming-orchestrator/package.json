@@ -1,0 +1,25 @@
+{
+	"name": "@warm-room-manager/streaming-orchestrator",
+	"version": "0.1.0",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"license": "MIT",
+	"scripts": {
+		"build": "tsc -b",
+		"dev": "tsx watch src/index.ts",
+		"start": "node dist/index.js"
+	},
+	"dependencies": {
+		"@fastify/cors": "11.1.0",
+		"@warm-room-manager/shared": "0.1.0",
+		"dotenv": "17.2.1",
+		"fastify": "5.5.0",
+		"googleapis": "^159.0.0",
+		"ws": "8.18.3"
+	},
+	"devDependencies": {
+		"@types/ws": "8.18.1",
+		"tsx": "4.20.4",
+		"typescript": "5.9.2"
+	}
+}

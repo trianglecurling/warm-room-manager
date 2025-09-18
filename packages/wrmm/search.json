@@ -1,0 +1,61 @@
+﻿{
+    "success":  true,
+    "data":  [
+                 {
+                     "team":  {
+                                  "id":  3,
+                                  "teamName":  "Team Beta",
+                                  "contextId":  2,
+                                  "lead":  "Eve Johnson",
+                                  "second":  "Frank White",
+                                  "third":  "Grace Brown",
+                                  "fourth":  "Henry Miller",
+                                  "vicePosition":  "third",
+                                  "skipPosition":  "fourth",
+                                  "homeClub":  "Uptown Club",
+                                  "createdAt":  "2025-08-10 15:03:39",
+                                  "updatedAt":  "2025-08-10 15:03:39"
+                              },
+                     "context":  {
+                                     "id":  2,
+                                     "name":  "Spring Tournament",
+                                     "type":  "tournament",
+                                     "startDate":  "2024-04-01T09:00:00Z",
+                                     "endDate":  "2024-04-03T18:00:00Z",
+                                     "createdAt":  "2025-08-10 15:03:39",
+                                     "updatedAt":  "2025-08-10 15:03:39"
+                                 },
+                     "matchType":  "contains",
+                     "matchField":  "allFields",
+                     "relevance":  100
+                 },
+                 {
+                     "team":  {
+                                  "id":  2,
+                                  "teamName":  "Team Alpha",
+                                  "contextId":  2,
+                                  "lead":  "Alice Wilson",
+                                  "second":  "Bob Davis",
+                                  "third":  "Carol Lee",
+                                  "fourth":  "David Taylor",
+                                  "vicePosition":  "third",
+                                  "skipPosition":  "fourth",
+                                  "homeClub":  "Downtown Club",
+                                  "createdAt":  "2025-08-10 15:03:39",
+                                  "updatedAt":  "2025-08-10 15:03:39"
+                              },
+                     "context":  {
+                                     "id":  2,
+                                     "name":  "Spring Tournament",
+                                     "type":  "tournament",
+                                     "startDate":  "2024-04-01T09:00:00Z",
+                                     "endDate":  "2024-04-03T18:00:00Z",
+                                     "createdAt":  "2025-08-10 15:03:39",
+                                     "updatedAt":  "2025-08-10 15:03:39"
+                                 },
+                     "matchType":  "contains",
+                     "matchField":  "allFields",
+                     "relevance":  100
+                 }
+             ]
+}

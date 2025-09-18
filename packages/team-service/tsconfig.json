@@ -1,0 +1,17 @@
+{
+    "compilerOptions": {
+      "target": "es2022",                  // Or 'esnext' for the latest features
+      "module": "esnext",                  // Output ES Module syntax
+      "moduleResolution": "node",          // Important for resolving node_modules
+      "esModuleInterop": true,             // For compatibility with CommonJS imports (like express)
+      "rootDir": "./src",                  // Source files are in 'src'
+      "outDir": "./dist",                  // Output compiled files to 'dist'
+      "forceConsistentCasingInFileNames": true,
+      "strict": true,
+      "skipLibCheck": true,
+      "resolveJsonModule": true,           // If you plan to import JSON files directly
+      "allowSyntheticDefaultImports": true // Related to esModuleInterop for cleaner imports
+    },
+    "include": ["src/**/*.ts"],            // Only include .ts files in src
+    "exclude": ["node_modules", "dist"]
+  }

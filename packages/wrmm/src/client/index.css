@@ -1,0 +1,129 @@
+@import "tailwindcss";
+
+@layer base {
+  html {
+    font-family: system-ui, sans-serif;
+  }
+  
+  :root {
+    --color-primary-50: #f0f8ff;
+    --color-primary-100: #e0f0ff;
+    --color-primary-200: #bae0ff;
+    --color-primary-300: #7cc7ff;
+    --color-primary-400: #36a9ff;
+    --color-primary-500: #0864a7;
+    --color-primary-600: #075a8f;
+    --color-primary-700: #064a77;
+    --color-primary-800: #053a5f;
+    --color-primary-900: #042a47;
+    --color-primary-950: #021a2f;
+    
+    /* Muted versions for buttons */
+    --color-primary-muted: #0d7bc4;
+    --color-primary-muted-hover: #0a6ba8;
+    --color-primary-light: #e0f0ff;
+    --color-primary-light-hover: #bae0ff;
+    
+    /* Neutral background */
+    --color-neutral-bg: #f8fafc;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-md font-medium transition-colors duration-200;
+    cursor: pointer;
+  }
+  
+  .btn-primary {
+    background-color: var(--color-primary-muted);
+    color: white;
+  }
+  
+  .btn-primary:hover {
+    background-color: var(--color-primary-muted-hover);
+  }
+  
+  .btn-primary:focus {
+    outline: 2px solid var(--color-primary-500);
+    outline-offset: 2px;
+  }
+  
+  .btn-secondary {
+    background-color: var(--color-primary-light);
+    color: var(--color-primary-800);
+    border: 1px solid var(--color-primary-300);
+  }
+  
+  .btn-secondary:hover {
+    background-color: var(--color-primary-light-hover);
+    border-color: var(--color-primary-400);
+  }
+  
+  .btn-secondary:focus {
+    outline: 2px solid var(--color-primary-500);
+    outline-offset: 2px;
+  }
+
+  /* Disabled state */
+  .btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  .btn-primary:disabled {
+    background-color: var(--color-primary-muted);
+    color: white;
+  }
+
+  .btn-secondary:disabled {
+    background-color: var(--color-primary-light);
+    color: var(--color-primary-800);
+    border-color: var(--color-primary-300);
+  }
+} 
+
+@tailwind utilities;
+
+/* Custom flash animations */
+@keyframes success-flash {
+  0%, 100% { 
+    background-color: rgb(255 255 255 / 0.95); /* bg-white/95 */
+  }
+  50% { 
+    background-color: rgb(34 197 94 / 0.95); /* bg-green-500/95 */
+  }
+}
+
+@keyframes warning-flash {
+  0%, 100% { 
+    background-color: rgb(255 255 255 / 0.95); /* bg-white/95 */
+  }
+  50% { 
+    background-color: rgb(234 179 8 / 0.95); /* bg-yellow-500/95 */
+  }
+}
+
+@keyframes error-flash {
+  0%, 100% { 
+    background-color: rgb(254 242 242); /* bg-red-50 */
+    border-color: rgb(254 202 202); /* border-red-200 */
+  }
+  50% { 
+    background-color: rgb(254 226 226); /* bg-red-100 */
+    border-color: rgb(252 165 165); /* border-red-300 */
+  }
+}
+
+.animate-success-flash {
+  animation: success-flash 1.5s ease-in-out;
+}
+
+.animate-warning-flash {
+  animation: warning-flash 1.5s ease-in-out;
+}
+
+.animate-error-flash {
+  animation: error-flash 1.5s ease-in-out;
+} 

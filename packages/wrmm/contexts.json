@@ -1,0 +1,23 @@
+﻿{
+    "success":  true,
+    "data":  [
+                 {
+                     "id":  2,
+                     "name":  "Spring Tournament",
+                     "type":  "tournament",
+                     "start_date":  "2024-04-01T09:00:00Z",
+                     "end_date":  "2024-04-03T18:00:00Z",
+                     "created_at":  "2025-08-10 15:03:39",
+                     "updated_at":  "2025-08-10 15:03:39"
+                 },
+                 {
+                     "id":  1,
+                     "name":  "Tuesday League",
+                     "type":  "league",
+                     "start_date":  "2024-01-15T18:00:00Z",
+                     "end_date":  "2024-03-15T22:00:00Z",
+                     "created_at":  "2025-08-10 15:03:39",
+                     "updated_at":  "2025-08-10 15:03:39"
+                 }
+             ]
+}
