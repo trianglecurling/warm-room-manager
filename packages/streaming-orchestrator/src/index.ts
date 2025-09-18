@@ -359,6 +359,8 @@ app.post<{
 		"ui"
 	);
 
+	console.log(`Created job ${job.id} with initial status: ${job.status}`);
+
 	if (idempotencyKey) pendingByIdem.set(idempotencyKey, job.id);
 
 	// Auto-create YouTube stream for new jobs
@@ -398,6 +400,7 @@ app.post<{
 		};
 
 		updateJob(job.id, { streamMetadata });
+		console.log(`Updated job ${job.id} with YouTube stream metadata`);
 	} catch (error) {
 		console.error('Failed to create YouTube stream:', error);
 
@@ -410,6 +413,8 @@ app.post<{
 				message: `Failed to create YouTube broadcast: ${errorMessage}`
 			}
 		});
+
+		console.log(`Job ${job.id} failed due to YouTube setup error: ${errorMessage}`);
 
 		// Return the failed job
 		return reply.code(201).send(jobs.get(job.id));
@@ -834,10 +839,12 @@ async function schedule() {
 		setAgentState(idle, "RESERVED");
 		updateJob(pending.id, { status: "ASSIGNED", agentId: idle.id });
 
-		const accepted = await sendAssignAndAwaitAck(idle, pending, 5000);
-
 		console.log(`Assigning job ${pending.id} to agent ${idle.id}`);
+		console.log(`Job status: ${pending.status}`);
+		console.log(`Job has streamMetadata: ${!!pending.streamMetadata}`);
 		console.log(`Job stream metadata:`, JSON.stringify(pending.streamMetadata, null, 2));
+
+		const accepted = await sendAssignAndAwaitAck(idle, pending, 5000);
 
 		if (!accepted) {
 			// Revert

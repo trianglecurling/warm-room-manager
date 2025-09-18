@@ -230,6 +230,9 @@ function onAssignStart(
 ) {
 	const { jobId, config, streamMetadata } = msg.payload;
 
+	console.log(`Received job assignment for ${jobId}`);
+	console.log(`Assignment payload:`, JSON.stringify(msg.payload, null, 2));
+
 	if (state !== "IDLE" || currentJobId) {
 		send(Msg.AgentAssignAck, { jobId, accepted: false, reason: "busy" }, msg.msgId);
 		return;
