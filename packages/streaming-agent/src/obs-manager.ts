@@ -17,11 +17,14 @@ export class OBSManager {
 	private obs: OBSWebSocket;
 	private ffmpegProcess: ChildProcess | null = null;
 	private isConnected = false;
-	private currentScene = 'Scene';
+	private currentScene = 'SheetA';
 	private config: OBSConfig;
+	private websocketPassword: string;
 
 	constructor(config: OBSConfig = { host: 'localhost', port: 4455 }) {
 		this.config = config;
+		// Generate a random password for WebSocket authentication
+		this.websocketPassword = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 		this.obs = new OBSWebSocket();
 
 		this.obs.on('ConnectionOpened', () => {
@@ -43,7 +46,7 @@ export class OBSManager {
 		try {
 			const { obsWebSocketVersion } = await this.obs.connect(
 				`ws://${this.config.host}:${this.config.port}`,
-				this.config.password
+				this.websocketPassword
 			);
 			console.log(`OBS WebSocket connected (version: ${obsWebSocketVersion})`);
 		} catch (error) {
@@ -67,12 +70,22 @@ export class OBSManager {
 		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
 		console.log(`OBS working directory: ${obsDir}`);
 
-		// Launch OBS with specific scene collection and profile
-		// Note: We don't use --startstreaming because we want OBS to just provide virtual camera
+		// Launch OBS with comprehensive launch parameters
+		console.log(`OBS WebSocket port: ${this.config.port}, password: ${this.websocketPassword}`);
+		console.log(`OBS starting scene: ${this.currentScene}`);
+
 		const obsProcess = spawn(obsPath, [
+			`--websocket_port=${this.config.port}`,
+			`--websocket_password=${this.websocketPassword}`,
+			'--collection',
+			'auto4k',
+			'--scene',
+			this.currentScene,
+			'--multi', // don't warn when launching multiple instances
+			'--disable-shutdown-check',
+			'--disable-updater',
 			'--minimize-to-tray',
-			'--startvirtualcam',
-			'--scene', this.currentScene
+			'--startvirtualcam'
 		], {
 			cwd: obsDir, // Set working directory to OBS installation directory
 			detached: true,

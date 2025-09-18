@@ -157,12 +157,17 @@ async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata)
 		}
 
 		// Determine scene name from stream metadata
-		let sceneName = 'Scene';
+		let sceneName = 'SheetA'; // Default scene
 		if (streamMetadata.streamContext?.sheet) {
 			if (streamMetadata.streamContext.sheet === 'vibe') {
-				sceneName = 'Vibe Scene';
-			} else {
-				sceneName = `Sheet ${streamMetadata.streamContext.sheet} Scene`;
+				sceneName = 'IceShedVibes';
+			} else if (['A', 'B', 'C', 'D'].includes(streamMetadata.streamContext.sheet.toUpperCase())) {
+				// Map A,B,C,D to SheetA, SheetB, SheetC, SheetD
+				const sheetLetter = streamMetadata.streamContext.sheet.toUpperCase();
+				if (sheetLetter === 'A') sceneName = 'SheetA';
+				else if (sheetLetter === 'B') sceneName = 'SheetB';
+				else if (sheetLetter === 'C') sceneName = 'SheetC';
+				else if (sheetLetter === 'D') sceneName = 'SheetD';
 			}
 		}
 
