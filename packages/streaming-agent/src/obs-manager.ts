@@ -62,17 +62,36 @@ export class OBSManager {
 	async startOBS(): Promise<void> {
 		const obsPath = process.env.OBS_PATH || 'obs64.exe';
 		console.log(`Starting OBS using path: ${obsPath}`);
+
+		// Extract OBS directory from the executable path
+		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
+		console.log(`OBS working directory: ${obsDir}`);
+
 		// Launch OBS with specific scene collection and profile
 		const obsProcess = spawn(obsPath, [
 			'--startstreaming',
 			'--minimize-to-tray',
 			'--scene', this.currentScene
 		], {
+			cwd: obsDir, // Set working directory to OBS installation directory
 			detached: true,
 			stdio: 'ignore'
 		});
 
 		obsProcess.unref();
+
+		// Handle OBS process errors
+		obsProcess.on('error', (error) => {
+			console.error('Failed to start OBS process:', error);
+			throw new Error(`OBS startup failed: ${error.message}`);
+		});
+
+		obsProcess.on('exit', (code, signal) => {
+			console.log(`OBS process exited with code: ${code}, signal: ${signal}`);
+			if (code !== 0 && code !== null) {
+				console.warn(`OBS exited unexpectedly with code ${code}`);
+			}
+		});
 
 		// Wait a bit for OBS to start up
 		await new Promise(resolve => setTimeout(resolve, 3000));
