@@ -378,6 +378,14 @@ app.post<{
 
 		const youtubeMetadata = await youtubeService.createLiveBroadcast(title, description);
 
+		console.log(`YouTube metadata created:`, {
+			videoId: youtubeMetadata.videoId,
+			streamUrl: youtubeMetadata.streamUrl,
+			streamKey: youtubeMetadata.streamKey,
+			hasStreamUrl: !!youtubeMetadata.streamUrl,
+			hasStreamKey: !!youtubeMetadata.streamKey
+		});
+
 		// Update job with YouTube metadata and stream context
 		const streamMetadata = {
 			title,
@@ -827,6 +835,9 @@ async function schedule() {
 		updateJob(pending.id, { status: "ASSIGNED", agentId: idle.id });
 
 		const accepted = await sendAssignAndAwaitAck(idle, pending, 5000);
+
+		console.log(`Assigning job ${pending.id} to agent ${idle.id}`);
+		console.log(`Job stream metadata:`, JSON.stringify(pending.streamMetadata, null, 2));
 
 		if (!accepted) {
 			// Revert

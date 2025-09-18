@@ -140,12 +140,19 @@ function stopHeartbeat() {
 async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata) {
 	try {
 		console.log(`Starting streaming job ${jobId}`);
+		console.log(`Stream metadata received:`, JSON.stringify(streamMetadata, null, 2));
 
 		if (!obsManager) {
 			throw new Error('OBS Manager not initialized');
 		}
 
 		if (!streamMetadata?.youtube?.streamUrl || !streamMetadata?.youtube?.streamKey) {
+			console.error('Missing YouTube stream configuration:', {
+				hasStreamMetadata: !!streamMetadata,
+				hasYoutube: !!streamMetadata?.youtube,
+				streamUrl: streamMetadata?.youtube?.streamUrl,
+				streamKey: streamMetadata?.youtube?.streamKey
+			});
 			throw new Error('Missing YouTube stream configuration');
 		}
 
