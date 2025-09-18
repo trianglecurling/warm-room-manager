@@ -68,9 +68,10 @@ export class OBSManager {
 		console.log(`OBS working directory: ${obsDir}`);
 
 		// Launch OBS with specific scene collection and profile
+		// Note: We don't use --startstreaming because we want OBS to just provide virtual camera
 		const obsProcess = spawn(obsPath, [
-			'--startstreaming',
 			'--minimize-to-tray',
+			'--startvirtualcam',
 			'--scene', this.currentScene
 		], {
 			cwd: obsDir, // Set working directory to OBS installation directory
@@ -102,15 +103,24 @@ export class OBSManager {
 
 	async stopOBS(): Promise<void> {
 		console.log('Stopping OBS...');
+
+		// Stop virtual camera and FFmpeg first
+		try {
+			await this.stopStreaming();
+		} catch (error) {
+			console.warn('Failed to stop streaming gracefully:', error);
+		}
+
 		this.cleanup();
 
-		// Try to close OBS gracefully
+		// Try to close OBS gracefully (no streaming to stop since we use FFmpeg)
 		try {
 			if (this.isConnected) {
-				await this.obs.call('StopStream');
+				// OBS might still be running, just disconnect WebSocket
+				await this.obs.disconnect();
 			}
 		} catch (error) {
-			console.warn('Failed to stop OBS stream gracefully:', error);
+			console.warn('Failed to disconnect OBS gracefully:', error);
 		}
 
 		// Force close OBS process if needed
@@ -127,6 +137,28 @@ export class OBSManager {
 		}
 	}
 
+	async startVirtualCamera(): Promise<void> {
+		try {
+			// Start the OBS Virtual Camera output
+			await this.obs.call('StartVirtualCam');
+			console.log('OBS Virtual Camera started');
+		} catch (error) {
+			console.error('Failed to start OBS Virtual Camera:', error);
+			throw error;
+		}
+	}
+
+	async stopVirtualCamera(): Promise<void> {
+		try {
+			// Stop the OBS Virtual Camera output
+			await this.obs.call('StopVirtualCam');
+			console.log('OBS Virtual Camera stopped');
+		} catch (error) {
+			console.error('Failed to stop OBS Virtual Camera:', error);
+			// Don't throw here as this might fail if already stopped
+		}
+	}
+
 	async startStreaming(streamConfig: StreamConfig, sceneName = 'Scene'): Promise<void> {
 		if (!this.isConnected) {
 			throw new Error('OBS not connected');
@@ -136,35 +168,32 @@ export class OBSManager {
 			// Switch to the specified scene
 			await this.setCurrentScene(sceneName);
 
-			// Configure streaming settings
-			await this.obs.call('SetStreamServiceSettings', {
-				streamServiceType: 'rtmp_common',
-				streamServiceSettings: {
-					server: streamConfig.streamUrl,
-					key: streamConfig.streamKey,
-				},
-			});
+			// Start the OBS virtual camera
+			await this.startVirtualCamera();
 
-			// Start the stream
-			await this.obs.call('StartStream');
+			// Start FFmpeg streaming from OBS virtual camera to YouTube
+			await this.startFFmpegStream(streamConfig);
 
-			console.log('OBS streaming started successfully');
+			console.log('OBS virtual camera and FFmpeg streaming started successfully');
 		} catch (error) {
-			console.error('Failed to start OBS streaming:', error);
+			console.error('Failed to start OBS virtual camera streaming:', error);
 			throw error;
 		}
 	}
 
 	async stopStreaming(): Promise<void> {
-		if (!this.isConnected) {
-			return;
-		}
-
 		try {
-			await this.obs.call('StopStream');
-			console.log('OBS streaming stopped successfully');
+			// Stop FFmpeg streaming first
+			await this.stopFFmpegStream();
+
+			// Stop OBS virtual camera
+			if (this.isConnected) {
+				await this.stopVirtualCamera();
+			}
+
+			console.log('OBS virtual camera and FFmpeg streaming stopped successfully');
 		} catch (error) {
-			console.error('Failed to stop OBS streaming:', error);
+			console.error('Failed to stop streaming:', error);
 			throw error;
 		}
 	}
@@ -248,9 +277,9 @@ export class OBSManager {
 	}
 
 	async startFFmpegStream(streamConfig: StreamConfig): Promise<void> {
-		console.log('Starting FFmpeg stream...');
+		console.log('Starting FFmpeg stream from OBS Virtual Camera to YouTube...');
 
-		// FFmpeg command as specified
+		// Exact FFmpeg command as specified in requirements
 		const ffmpegArgs = [
 			'-f', 'dshow',
 			'-rtbufsize', '1000M',
@@ -278,6 +307,8 @@ export class OBSManager {
 			'-f', 'flv',
 			`rtmp://${streamConfig.streamUrl.replace('rtmp://', '')}/${streamConfig.streamKey}`
 		];
+
+		console.log('FFmpeg command:', 'ffmpeg', ffmpegArgs.join(' '));
 
 		this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
 			stdio: ['ignore', 'pipe', 'pipe']

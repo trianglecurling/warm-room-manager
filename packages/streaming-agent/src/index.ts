@@ -147,13 +147,13 @@ async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata)
 		}
 
 		if (!streamMetadata?.youtube?.streamUrl || !streamMetadata?.youtube?.streamKey) {
-			console.error('Missing YouTube stream configuration:', {
+			console.error('Missing YouTube stream configuration for FFmpeg:', {
 				hasStreamMetadata: !!streamMetadata,
 				hasYoutube: !!streamMetadata?.youtube,
 				streamUrl: streamMetadata?.youtube?.streamUrl,
 				streamKey: streamMetadata?.youtube?.streamKey
 			});
-			throw new Error('Missing YouTube stream configuration');
+			throw new Error('Missing YouTube stream configuration for FFmpeg');
 		}
 
 		// Determine scene name from stream metadata
@@ -177,7 +177,7 @@ async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata)
 			streamKey: streamMetadata.youtube.streamKey
 		}, sceneName);
 
-		console.log(`Streaming job ${jobId} started successfully`);
+		console.log(`Streaming job ${jobId} started successfully (OBS Virtual Camera + FFmpeg)`);
 		send(Msg.AgentJobUpdate, { jobId, status: "RUNNING" as JobStatus });
 
 	} catch (error) {
