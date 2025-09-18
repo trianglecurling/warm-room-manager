@@ -55,6 +55,31 @@ export class OBSManager {
 		}
 	}
 
+	async connectWithRetry(maxRetries = 10, retryInterval = 1000): Promise<void> {
+		console.log(`Attempting to connect to OBS WebSocket (will retry up to ${maxRetries} times)...`);
+
+		for (let attempt = 1; attempt <= maxRetries; attempt++) {
+			try {
+				console.log(`WebSocket connection attempt ${attempt}/${maxRetries}...`);
+				await this.connect();
+				console.log(`✅ OBS WebSocket connected successfully on attempt ${attempt}`);
+				return; // Success, exit the retry loop
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				console.warn(`WebSocket connection attempt ${attempt}/${maxRetries} failed:`, errorMessage);
+
+				if (attempt === maxRetries) {
+					// This was the last attempt, throw the error
+					throw new Error(`Failed to connect to OBS WebSocket after ${maxRetries} attempts: ${errorMessage}`);
+				}
+
+				// Wait before retrying
+				console.log(`Waiting ${retryInterval}ms before retry...`);
+				await new Promise(resolve => setTimeout(resolve, retryInterval));
+			}
+		}
+	}
+
 	async disconnect(): Promise<void> {
 		if (this.isConnected) {
 			await this.obs.disconnect();
@@ -84,6 +109,7 @@ export class OBSManager {
 			'--multi', // don't warn when launching multiple instances
 			'--disable-shutdown-check',
 			'--disable-updater',
+			'--minimize-to-tray',
 			'--startvirtualcam'
 		], {
 			cwd: obsDir, // Set working directory to OBS installation directory
@@ -106,11 +132,13 @@ export class OBSManager {
 			}
 		});
 
-		// Wait a bit for OBS to start up
-		await new Promise(resolve => setTimeout(resolve, 3000));
+		// Wait longer for OBS to fully initialize (5 seconds)
+		console.log('Waiting 5 seconds for OBS to fully initialize...');
+		await new Promise(resolve => setTimeout(resolve, 5000));
 
-		// Try to connect to OBS WebSocket
-		await this.connect();
+		// Try to connect to OBS WebSocket with retry logic (up to ~12 seconds total)
+		console.log('OBS should now be ready for WebSocket connection');
+		await this.connectWithRetry(12, 1000); // 12 attempts, 1 second apart
 	}
 
 	async stopOBS(): Promise<void> {
