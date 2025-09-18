@@ -132,13 +132,13 @@ export class OBSManager {
 			}
 		});
 
-		// Wait longer for OBS to fully initialize (5 seconds)
-		console.log('Waiting 5 seconds for OBS to fully initialize...');
-		await new Promise(resolve => setTimeout(resolve, 5000));
+		// Wait longer for OBS to fully initialize (15 seconds)
+		console.log('Waiting 15 seconds for OBS to fully initialize...');
+		await new Promise(resolve => setTimeout(resolve, 15000));
 
-		// Try to connect to OBS WebSocket with retry logic (up to ~12 seconds total)
+		// Try to connect to OBS WebSocket with retry logic (up to ~15 seconds total)
 		console.log('OBS should now be ready for WebSocket connection');
-		await this.connectWithRetry(12, 1000); // 12 attempts, 1 second apart
+		await this.connectWithRetry(15, 1000); // 15 attempts, 1 second apart (~15 seconds total)
 	}
 
 	async stopOBS(): Promise<void> {
