@@ -98,6 +98,7 @@ export class OBSManager {
 		// Launch OBS with comprehensive launch parameters
 		console.log(`OBS WebSocket port: ${this.config.port}, password: ${this.websocketPassword}`);
 		console.log(`OBS starting scene: ${this.currentScene}`);
+		console.log(`OBS virtual camera will start automatically via --startvirtualcam`);
 
 		const obsProcess = spawn(obsPath, [
 			`--websocket_port=${this.config.port}`,
@@ -177,27 +178,6 @@ export class OBSManager {
 		}
 	}
 
-	async startVirtualCamera(): Promise<void> {
-		try {
-			// Start the OBS Virtual Camera output
-			await this.obs.call('StartVirtualCam');
-			console.log('OBS Virtual Camera started');
-		} catch (error) {
-			console.error('Failed to start OBS Virtual Camera:', error);
-			throw error;
-		}
-	}
-
-	async stopVirtualCamera(): Promise<void> {
-		try {
-			// Stop the OBS Virtual Camera output
-			await this.obs.call('StopVirtualCam');
-			console.log('OBS Virtual Camera stopped');
-		} catch (error) {
-			console.error('Failed to stop OBS Virtual Camera:', error);
-			// Don't throw here as this might fail if already stopped
-		}
-	}
 
 	async startStreaming(streamConfig: StreamConfig, sceneName = 'Scene'): Promise<void> {
 		if (!this.isConnected) {
@@ -208,15 +188,13 @@ export class OBSManager {
 			// Switch to the specified scene
 			await this.setCurrentScene(sceneName);
 
-			// Start the OBS virtual camera
-			await this.startVirtualCamera();
-
-			// Start FFmpeg streaming from OBS virtual camera to YouTube
+			// Virtual camera is already started via --startvirtualcam launch parameter
+			// Just start FFmpeg streaming from OBS virtual camera to YouTube
 			await this.startFFmpegStream(streamConfig);
 
-			console.log('OBS virtual camera and FFmpeg streaming started successfully');
+			console.log('FFmpeg streaming from OBS virtual camera started successfully');
 		} catch (error) {
-			console.error('Failed to start OBS virtual camera streaming:', error);
+			console.error('Failed to start FFmpeg streaming:', error);
 			throw error;
 		}
 	}
@@ -226,12 +204,8 @@ export class OBSManager {
 			// Stop FFmpeg streaming first
 			await this.stopFFmpegStream();
 
-			// Stop OBS virtual camera
-			if (this.isConnected) {
-				await this.stopVirtualCamera();
-			}
-
-			console.log('OBS virtual camera and FFmpeg streaming stopped successfully');
+			// Virtual camera will stop automatically when OBS shuts down
+			console.log('FFmpeg streaming stopped successfully');
 		} catch (error) {
 			console.error('Failed to stop streaming:', error);
 			throw error;
