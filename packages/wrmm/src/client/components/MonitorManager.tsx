@@ -88,6 +88,7 @@ export const MonitorManager = () => {
     adminUrl: string;
     jobId?: string; // Associated orchestrator job ID
     jobStatus?: string; // Status from orchestrator job
+    error?: string; // Error message from failed jobs
     team1?: string;
     team2?: string;
   }
@@ -124,27 +125,38 @@ export const MonitorManager = () => {
       updatedStreams[key as StreamKey].jobStatus = undefined;
     });
 
-    // Set streams live based on running jobs
+    // Set streams live based on running jobs or handle failed jobs
     orchestratorJobs.forEach(job => {
-      if (job.status === 'RUNNING' && job.inlineConfig?.streamKey) {
+      if (job.inlineConfig?.streamKey) {
         const streamKey = job.inlineConfig.streamKey as StreamKey;
         if (updatedStreams[streamKey]) {
-          // Use streamMetadata if available, otherwise fall back to inlineConfig or local state
-          const metadata = job.streamMetadata;
-          updatedStreams[streamKey] = {
-            ...updatedStreams[streamKey],
-            isLive: true,
-            jobId: job.id,
-            jobStatus: job.status,
-            // Use metadata from orchestrator, with fallbacks
-            title: metadata?.title || (job.inlineConfig?.title as string) || updatedStreams[streamKey].title,
-            description: metadata?.description || (job.inlineConfig?.description as string) || updatedStreams[streamKey].description,
-            viewers: metadata?.viewers ?? 0, // Use real viewer count from orchestrator, default to 0
-            publicUrl: metadata?.publicUrl || (job.inlineConfig?.publicUrl as string) || updatedStreams[streamKey].publicUrl,
-            adminUrl: metadata?.adminUrl || (job.inlineConfig?.adminUrl as string) || updatedStreams[streamKey].adminUrl,
-            // muted state comes from metadata if available
-            muted: metadata?.isMuted ?? updatedStreams[streamKey].muted,
-          };
+          if (job.status === 'RUNNING') {
+            // Use streamMetadata if available, otherwise fall back to inlineConfig or local state
+            const metadata = job.streamMetadata;
+            updatedStreams[streamKey] = {
+              ...updatedStreams[streamKey],
+              isLive: true,
+              jobId: job.id,
+              jobStatus: job.status,
+              // Use metadata from orchestrator, with fallbacks
+              title: metadata?.title || (job.inlineConfig?.title as string) || updatedStreams[streamKey].title,
+              description: metadata?.description || (job.inlineConfig?.description as string) || updatedStreams[streamKey].description,
+              viewers: metadata?.viewers ?? 0, // Use real viewer count from orchestrator, default to 0
+              publicUrl: metadata?.publicUrl || (job.inlineConfig?.publicUrl as string) || updatedStreams[streamKey].publicUrl,
+              adminUrl: metadata?.adminUrl || (job.inlineConfig?.adminUrl as string) || updatedStreams[streamKey].adminUrl,
+              // muted state comes from metadata if available
+              muted: metadata?.isMuted ?? updatedStreams[streamKey].muted,
+            };
+          } else if (job.status === 'FAILED' && job.error) {
+            // Handle failed jobs by showing error state
+            updatedStreams[streamKey] = {
+              ...updatedStreams[streamKey],
+              isLive: false,
+              jobId: job.id,
+              jobStatus: job.status,
+              error: job.error.message,
+            };
+          }
         }
       }
     });
@@ -2034,11 +2046,16 @@ export const MonitorManager = () => {
                       <div>
                         <h3 className="text-lg font-semibold text-gray-900">{s.name}</h3>
                         <div className="flex items-center gap-2 mt-1">
-                          <span className={`inline-block w-2.5 h-2.5 rounded-full ${s.isLive ? 'bg-red-500' : 'bg-gray-300'}`} title={s.isLive ? 'Live' : 'Offline'}></span>
-                          <span className="text-sm text-gray-600">{s.isLive ? 'LIVE' : 'OFFLINE'}</span>
+                          <span className={`inline-block w-2.5 h-2.5 rounded-full ${s.isLive ? 'bg-red-500' : s.error ? 'bg-red-500' : 'bg-gray-300'}`} title={s.isLive ? 'Live' : s.error ? 'Error' : 'Offline'}></span>
+                          <span className="text-sm text-gray-600">{s.isLive ? 'LIVE' : s.error ? 'ERROR' : 'OFFLINE'}</span>
                           <span className="text-gray-300">•</span>
                           <span className="text-sm text-gray-600">Viewers: {s.viewers}</span>
                         </div>
+                        {s.error && (
+                          <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-800">
+                            <strong>Error:</strong> {s.error}
+                          </div>
+                        )}
                       </div>
                       <label className="flex items-center gap-2 text-sm text-gray-700 select-none" title={key === 'vibe' ? 'Auto-selected when 2+ other streams selected and agent available' : 'Select for bulk controls'}>
                         <input type="checkbox" className="h-4 w-4" checked={selected} onChange={() => toggleSelect(key)} disabled={key === 'vibe'} />

@@ -60,9 +60,10 @@ export class OBSManager {
 	}
 
 	async startOBS(): Promise<void> {
-		console.log('Starting OBS...');
+		const obsPath = process.env.OBS_PATH || 'obs64.exe';
+		console.log(`Starting OBS using path: ${obsPath}`);
 		// Launch OBS with specific scene collection and profile
-		const obsProcess = spawn('obs64.exe', [
+		const obsProcess = spawn(obsPath, [
 			'--startstreaming',
 			'--minimize-to-tray',
 			'--scene', this.currentScene
@@ -95,7 +96,11 @@ export class OBSManager {
 
 		// Force close OBS process if needed
 		try {
-			spawn('taskkill', ['/f', '/im', 'obs64.exe'], {
+			const obsPath = process.env.OBS_PATH || 'obs64.exe';
+			// Extract just the executable name for taskkill (e.g., "obs64.exe" from full path)
+			const obsExeName = obsPath.split('\\').pop() || 'obs64.exe';
+			console.log(`Stopping OBS process: ${obsExeName}`);
+			spawn('taskkill', ['/f', '/im', obsExeName], {
 				stdio: 'ignore'
 			});
 		} catch (error) {

@@ -392,8 +392,19 @@ app.post<{
 		updateJob(job.id, { streamMetadata });
 	} catch (error) {
 		console.error('Failed to create YouTube stream:', error);
-		// Don't fail the job creation, just log the error
-		// The job can still proceed without YouTube integration
+
+		// Fail the job creation if YouTube setup fails
+		const errorMessage = error instanceof Error ? error.message : 'Unknown YouTube API error';
+		updateJob(job.id, {
+			status: "FAILED",
+			error: {
+				code: "YOUTUBE_SETUP_FAILED",
+				message: `Failed to create YouTube broadcast: ${errorMessage}`
+			}
+		});
+
+		// Return the failed job
+		return reply.code(201).send(jobs.get(job.id));
 	}
 
 	return reply.code(201).send(job);
