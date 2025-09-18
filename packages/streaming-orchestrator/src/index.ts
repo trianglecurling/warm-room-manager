@@ -62,7 +62,7 @@ function createJob(partial: Partial<Job> & { inlineConfig?: Record<string, unkno
 		id,
 		templateId: partial.templateId ?? null,
 		inlineConfig: partial.inlineConfig ?? null,
-		status: "PENDING",
+		status: partial.status ?? "PENDING", // Allow custom status
 		agentId: null,
 		createdAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
@@ -354,8 +354,15 @@ app.post<{
 		return reply.code(200).send(jobs.get(jobId));
 	}
 
+	// Create job with CREATED status initially (not PENDING)
 	const job = createJob(
-		{ templateId: templateId ?? null, inlineConfig: inlineConfig ?? null, idempotencyKey, restartPolicy },
+		{
+			templateId: templateId ?? null,
+			inlineConfig: inlineConfig ?? null,
+			idempotencyKey,
+			restartPolicy,
+			status: "CREATED" // Don't make it PENDING yet
+		},
 		"ui"
 	);
 
@@ -399,8 +406,13 @@ app.post<{
 			streamContext, // Store the context for future reference
 		};
 
-		updateJob(job.id, { streamMetadata });
-		console.log(`Updated job ${job.id} with YouTube stream metadata`);
+		// Now mark the job as PENDING so it can be scheduled
+		updateJob(job.id, {
+			streamMetadata,
+			status: "PENDING"
+		});
+
+		console.log(`Updated job ${job.id} with YouTube stream metadata and marked as PENDING`);
 	} catch (error) {
 		console.error('Failed to create YouTube stream:', error);
 
@@ -420,7 +432,7 @@ app.post<{
 		return reply.code(201).send(jobs.get(job.id));
 	}
 
-	return reply.code(201).send(job);
+	return reply.code(201).send(jobs.get(job.id));
 });
 
 app.post<{ Params: { id: string } }>("/v1/jobs/:id/stop", async (req, reply) => {
