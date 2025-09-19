@@ -77,10 +77,10 @@ export class OBSManager {
 		this.cleanup();
 	}
 
-	async startOBS(): Promise<void> {
+	async startOBS(sceneName: string = 'SheetA'): Promise<void> {
 		const obsPath = process.env.OBS_PATH || 'obs64.exe';
 
-		console.log('Starting OBS with path:', obsPath);
+		console.log('Starting OBS with path:', obsPath, 'and scene:', sceneName);
 		const { spawn } = require('child_process');
 
 		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
@@ -90,7 +90,7 @@ export class OBSManager {
 			'--websocket_port=4455',
 			'--websocket_password=randompassword123',
 			'--collection', 'auto4k',
-			'--scene', 'SheetA',
+			'--scene', sceneName,
 			'--multi',
 			'--disable-shutdown-check',
 			'--disable-updater',
@@ -148,14 +148,15 @@ export class OBSManager {
 		}
 	}
 
-	async startStreaming(streamConfig: StreamConfig, sceneName = 'Scene'): Promise<void> {
-		if (!this.isConnected) {
-			throw new Error('OBS not connected');
-		}
-
+	async startStreaming(streamConfig: StreamConfig, sceneName = 'SheetA'): Promise<void> {
 		try {
-			// Switch to the specified scene
-			await this.setCurrentScene(sceneName);
+			// Start OBS if not already running, with the correct scene
+			if (!this.isConnected) {
+				await this.startOBS(sceneName);
+			} else {
+				// If OBS is already running, just switch to the correct scene
+				await this.setCurrentScene(sceneName);
+			}
 
 			await this.startFFmpegStream(streamConfig);
 

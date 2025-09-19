@@ -171,12 +171,7 @@ async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata)
 			}
 		}
 
-		// Start OBS if not already running
-		if (!obsManager.isOBSConnected()) {
-			await obsManager.startOBS();
-		}
-
-		// Start streaming to YouTube
+		// Start streaming to YouTube (OBS will be started automatically with correct scene)
 		await obsManager.startStreaming({
 			streamUrl: streamMetadata.youtube.streamUrl,
 			streamKey: streamMetadata.youtube.streamKey
