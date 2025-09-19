@@ -536,15 +536,21 @@ const wssUi = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
 	const { url } = req;
+	console.log(`WebSocket upgrade request: ${url}`);
 	if (url?.startsWith("/agent")) {
+		console.log(`Upgrading agent WebSocket connection`);
 		wssAgents.handleUpgrade(req, socket, head, (ws) => {
+			console.log(`Agent WebSocket connection established`);
 			wssAgents.emit("connection", ws, req);
 		});
 	} else if (url?.startsWith("/ui")) {
+		console.log(`Upgrading UI WebSocket connection`);
 		wssUi.handleUpgrade(req, socket, head, (ws) => {
+			console.log(`UI WebSocket connection established`);
 			wssUi.emit("connection", ws, req);
 		});
 	} else {
+		console.log(`Rejecting WebSocket upgrade for unknown path: ${url}`);
 		socket.destroy();
 	}
 });
@@ -583,6 +589,18 @@ const pendingAssignAcks = new Map<string, PendingAck>(); // correlationId -> wai
 wssAgents.on("connection", (ws) => {
 	let attachedAgentId: string | null = null;
 
+	ws.on("error", (error) => {
+		console.error(`WebSocket error for agent ${attachedAgentId || 'unknown'}:`, error);
+		// Try to close the connection gracefully on error
+		try {
+			if (ws.readyState === WebSocket.OPEN) {
+				ws.close(1011, "Internal server error");
+			}
+		} catch (e) {
+			console.error(`Error closing WebSocket after error:`, e);
+		}
+	});
+
 	ws.on("message", (raw) => {
 		let msg: WSMessage<any>;
 		try {
@@ -603,12 +621,15 @@ wssAgents.on("connection", (ws) => {
 			};
 
 			if (auth?.token !== AGENT_TOKEN) {
+				console.warn(`Agent authentication failed for ${name} (${agentId}): invalid token`);
 				ws.close(4001, "Unauthorized");
 				return;
 			}
 
+			console.log(`Agent Hello received - ID: ${agentId}, Name: ${name}, Auth token: ${auth?.token ? 'provided' : 'missing'}`);
 			let agent = agents.get(agentId);
 			if (!agent) {
+				console.log(`New agent ${name} (${agentId}) connecting`);
 				agent = {
 					id: agentId,
 					name,
@@ -625,11 +646,15 @@ wssAgents.on("connection", (ws) => {
 				};
 				agents.set(agentId, agent);
 			} else {
-				// Check if the existing agent is still connected
-				if (agent.ws && agent.ws.readyState === WebSocket.OPEN && agent.state !== "OFFLINE") {
-					console.warn(`Rejecting duplicate agent connection for ID ${agentId} from ${name}`);
-					ws.close(4002, "Agent ID already in use by another active agent");
-					return;
+				console.log(`Agent ${name} (${agentId}) reconnecting`);
+				// Always allow reconnection - clean up any existing WebSocket
+				if (agent.ws && agent.ws !== ws && agent.ws.readyState === WebSocket.OPEN) {
+					console.log(`Closing previous WebSocket for agent ${agentId}`);
+					try {
+						agent.ws.close();
+					} catch (e) {
+						// Ignore errors when closing old connection
+					}
 				}
 			}
 			agent.ws = ws;
@@ -641,6 +666,7 @@ wssAgents.on("connection", (ws) => {
 			attachedAgentId = agentId;
 
 			setAgentState(agent, agent.state === "OFFLINE" ? "IDLE" : agent.state);
+			console.log(`Agent ${name} (${agentId}) successfully connected`);
 
 			// Reconcile active job (if any)
 			if (activeJob?.jobId) {
@@ -802,10 +828,11 @@ wssAgents.on("connection", (ws) => {
 		}
 	});
 
-	ws.on("close", () => {
+	ws.on("close", (code, reason) => {
 		if (!attachedAgentId) return;
 		const agent = agents.get(attachedAgentId);
 		if (!agent) return;
+		console.log(`Agent ${agent.name} (${attachedAgentId}) disconnected - Code: ${code}, Reason: ${reason?.toString() || 'No reason'}`);
 		setAgentState(agent, "OFFLINE");
 	});
 });
