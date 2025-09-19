@@ -127,14 +127,13 @@ export class OBSManager {
 	async stopOBS(): Promise<void> {
 		console.log('Stopping OBS...');
 
-		// Stop virtual camera and FFmpeg first
+		// Only call cleanup if we're not already in a stopStreaming sequence
+		// cleanup() calls stopFFmpegStream() which we may have already called
 		try {
-			await this.stopStreaming();
+			await this.stopFFmpegStream();
 		} catch (error) {
-			console.warn('Failed to stop streaming gracefully:', error);
+			console.warn('Failed to stop FFmpeg in stopOBS, it may already be stopped:', error);
 		}
-
-		this.cleanup();
 
 		// Force close OBS process if needed
 		try {
@@ -177,9 +176,14 @@ export class OBSManager {
 			// Stop the virtual camera using OBS WebSocket
 			await this.obs.call('StopVirtualCam');
 			console.log('Virtual camera stopped successfully');
-		} catch (error) {
-			console.warn('Failed to stop virtual camera via WebSocket, it may already be stopped:', error);
-			// Don't throw error here as virtual camera might already be stopped
+		} catch (error: any) {
+			// Handle different types of errors gracefully
+			if (error.code === 501) {
+				console.log('StopVirtualCam not supported by this OBS version, virtual camera may stop automatically when OBS closes');
+			} else {
+				console.warn('Failed to stop virtual camera via WebSocket, it may already be stopped:', error.message || error);
+			}
+			// Don't throw error here as virtual camera might already be stopped or command not supported
 		}
 	}
 
@@ -403,7 +407,8 @@ export class OBSManager {
 	}
 
 	private cleanup(): Promise<void> {
-		return this.stopFFmpegStream();
+		// Cleanup is now handled directly in stopOBS to avoid circular calls
+		return Promise.resolve();
 	}
 
 	isOBSConnected(): boolean {
