@@ -62,8 +62,8 @@ export class YouTubeService {
 						selfDeclaredMadeForKids: false, // Explicitly set as not made for kids
 					},
 					contentDetails: {
-						enableAutoStart: false,
-						enableAutoStop: false,
+						enableAutoStart: true,
+						enableAutoStop: true,
 						enableContentEncryption: false,
 						enableDvr: true,
 						enableEmbed: true,
