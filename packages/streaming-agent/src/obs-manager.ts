@@ -110,9 +110,13 @@ export class OBSManager {
 	}
 
 	async startOBS(sceneName: string = 'SheetA'): Promise<void> {
+		// Update current scene before starting OBS
+		this.currentScene = sceneName;
+
 		const obsPath = process.env.OBS_PATH || 'obs64.exe';
 
 		console.log('🏁 Starting OBS with path:', obsPath, 'and scene:', sceneName);
+		console.log('🎬 Setting currentScene to:', sceneName);
 		const { spawn } = require('child_process');
 
 		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
@@ -323,6 +327,7 @@ export class OBSManager {
 
 		// Build the FFmpeg command as individual arguments for proper parsing
 		// Get the correct audio source for the current scene
+		console.log(`🎵 About to get audio source. Current scene: "${this.currentScene}", isConnected: ${this.isConnected}`);
 		const audioSource = this.getAudioSourceForScene();
 		console.log(`🎵 Using audio source for scene ${this.currentScene}: ${audioSource}`);
 

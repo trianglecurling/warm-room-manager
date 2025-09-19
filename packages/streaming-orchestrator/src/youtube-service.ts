@@ -58,7 +58,7 @@ export class YouTubeService {
 						scheduledStartTime: new Date(Date.now() + 60000).toISOString(), // Start in 1 minute
 					},
 					status: {
-						privacyStatus: 'public',
+						privacyStatus: 'unlisted',
 						selfDeclaredMadeForKids: false, // Explicitly set as not made for kids
 					},
 					contentDetails: {
