@@ -20,6 +20,7 @@ export class OBSManager {
 	private currentScene = 'SheetA';
 	private config: OBSConfig;
 	private websocketPassword: string;
+	private preferDeviceId = true; // Start with device ID, fallback to friendly name if it fails
 
 	constructor(config: OBSConfig = { host: 'localhost', port: 4455 }) {
 		this.config = config;
@@ -294,12 +295,14 @@ export class OBSManager {
 
 		let deviceList = '';
 
+		// Set up working directory for FFmpeg
+		const obsPath = process.env.OBS_PATH || 'obs64.exe';
+		const ffmpegCwd = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
+
 		// First, list available video devices to see what's actually available
 		console.log('🔍 Checking available video devices...');
 		try {
 			const { spawn } = require('child_process');
-			const obsPath = process.env.OBS_PATH || 'obs64.exe';
-			const ffmpegCwd = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
 
 			const listDevicesProcess = spawn('ffmpeg', ['-f', 'dshow', '-list_devices', 'true', '-i', 'dummy'], {
 				cwd: ffmpegCwd,
@@ -347,19 +350,31 @@ export class OBSManager {
 
 		// Try to find the correct OBS Virtual Camera device name from the device list
 		let obsCameraName = 'OBS Virtual Camera'; // Default name
+
 		if (deviceList && deviceList.includes('OBS')) {
-			// First try to extract the device ID (more reliable than friendly name)
-			const deviceIdMatch = deviceList.match(/Alternative name "([^"]*\{[^}]+\}[^"]*)"/);
-			if (deviceIdMatch && deviceIdMatch[1]) {
-				obsCameraName = deviceIdMatch[1];
-				console.log(`🔍 Found OBS camera device ID: "${obsCameraName}"`);
-				console.log('🎯 Using device ID instead of friendly name for better reliability');
+			if (this.preferDeviceId) {
+				// Try device ID first (preferred for reliability)
+				const deviceIdMatch = deviceList.match(/Alternative name "([^"]*\{[^}]+\}[^"]*)"/);
+				if (deviceIdMatch && deviceIdMatch[1]) {
+					obsCameraName = deviceIdMatch[1];
+					console.log(`🔍 Found OBS camera device ID: "${obsCameraName}"`);
+					console.log('🎯 Using device ID for maximum compatibility');
+				} else {
+					console.log('⚠️ Device ID not found, falling back to friendly name');
+					this.preferDeviceId = false; // Don't try device ID next time
+					const obsMatch = deviceList.match(/\[dshow @ [^\]]+\] "([^"]*OBS[^"]*)"/);
+					if (obsMatch && obsMatch[1]) {
+						obsCameraName = obsMatch[1];
+						console.log(`🔍 Found OBS camera device (friendly name): "${obsCameraName}"`);
+					}
+				}
 			} else {
-				// Fallback to friendly name if device ID extraction fails
+				// Use friendly name (fallback mode)
 				const obsMatch = deviceList.match(/\[dshow @ [^\]]+\] "([^"]*OBS[^"]*)"/);
 				if (obsMatch && obsMatch[1]) {
 					obsCameraName = obsMatch[1];
 					console.log(`🔍 Found OBS camera device (friendly name): "${obsCameraName}"`);
+					console.log('📝 Using friendly name (device ID failed previously)');
 				}
 			}
 		}
@@ -397,9 +412,47 @@ export class OBSManager {
 		console.log('Current working directory:', process.cwd());
 		console.log('PATH environment sample:', process.env.PATH?.split(';').slice(0, 3).join(';') + '...');
 
-		// Use the same working directory as OBS for consistency
-		const obsPath = process.env.OBS_PATH || 'obs64.exe';
-		const ffmpegCwd = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
+		// Test the exact FFmpeg command manually before spawning
+		console.log('🧪 Testing FFmpeg command manually...');
+		try {
+			const { spawn } = require('child_process');
+			const testCommand = spawn('ffmpeg', ffmpegArgs.slice(0, 6), { // Just test the video input part
+				cwd: ffmpegCwd,  // ffmpegCwd is declared at the top of the function
+				stdio: ['ignore', 'pipe', 'pipe']
+			});
+
+			let testOutput = '';
+			let testError = '';
+
+			testCommand.stdout?.on('data', (data: Buffer) => {
+				testOutput += data.toString();
+			});
+
+			testCommand.stderr?.on('data', (data: Buffer) => {
+				testError += data.toString();
+			});
+
+			await new Promise((resolve) => {
+				testCommand.on('close', (code: number | null) => {
+					console.log(`Manual FFmpeg test exited with code: ${code}`);
+					if (code === 0) {
+						console.log('✅ Manual FFmpeg test succeeded');
+					} else {
+						console.log('❌ Manual FFmpeg test failed');
+						console.log('Test output:', testOutput);
+						console.log('Test error:', testError);
+					}
+					resolve(void 0);
+				});
+				setTimeout(() => {
+					testCommand.kill();
+					console.log('⏰ Manual FFmpeg test timed out');
+					resolve(void 0);
+				}, 5000);
+			});
+		} catch (manualTestError) {
+			console.warn('⚠️ Manual FFmpeg test error:', manualTestError);
+		}
 
 		console.log('FFmpeg working directory will be:', ffmpegCwd);
 
@@ -434,6 +487,7 @@ export class OBSManager {
 			} else {
 				console.log('📝 Using friendly device name');
 			}
+			console.log(`🎛️  Device preference mode: ${this.preferDeviceId ? 'Device ID' : 'Friendly Name'}`);
 
 			this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
 				cwd: ffmpegCwd,  // Use same working directory as OBS
@@ -462,11 +516,11 @@ export class OBSManager {
 					console.warn(`⚠️  FFmpeg exited unexpectedly with code ${code}`);
 					console.warn('This usually indicates a device access issue');
 
-					// If we used device ID and it failed, try friendly name as fallback
-					if (!hasTriedFallback && obsCameraName.includes('{') && deviceList.includes('OBS Virtual Camera')) {
-						console.log('🔄 FFmpeg failed with device ID, trying friendly name as fallback...');
+					// If we used device ID and it failed, switch to friendly name for future attempts
+					if (!hasTriedFallback && obsCameraName.includes('{')) {
+						console.log('🔄 Device ID failed, switching to friendly name for future attempts');
+						this.preferDeviceId = false; // Switch to friendly name mode
 						hasTriedFallback = true;
-						// Note: We can't easily retry here due to async nature, but this gives us diagnostic info
 					}
 				}
 				this.ffmpegProcess = null;
