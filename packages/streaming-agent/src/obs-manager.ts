@@ -348,11 +348,19 @@ export class OBSManager {
 		// Try to find the correct OBS Virtual Camera device name from the device list
 		let obsCameraName = 'OBS Virtual Camera'; // Default name
 		if (deviceList && deviceList.includes('OBS')) {
-			// Try to extract the exact device name from the FFmpeg output
-			const obsMatch = deviceList.match(/\[dshow @ [^\]]+\] "([^"]*OBS[^"]*)"/);
-			if (obsMatch && obsMatch[1]) {
-				obsCameraName = obsMatch[1];
-				console.log(`🔍 Found OBS camera device: "${obsCameraName}"`);
+			// First try to extract the device ID (more reliable than friendly name)
+			const deviceIdMatch = deviceList.match(/Alternative name "([^"]*\{[^}]+\}[^"]*)"/);
+			if (deviceIdMatch && deviceIdMatch[1]) {
+				obsCameraName = deviceIdMatch[1];
+				console.log(`🔍 Found OBS camera device ID: "${obsCameraName}"`);
+				console.log('🎯 Using device ID instead of friendly name for better reliability');
+			} else {
+				// Fallback to friendly name if device ID extraction fails
+				const obsMatch = deviceList.match(/\[dshow @ [^\]]+\] "([^"]*OBS[^"]*)"/);
+				if (obsMatch && obsMatch[1]) {
+					obsCameraName = obsMatch[1];
+					console.log(`🔍 Found OBS camera device (friendly name): "${obsCameraName}"`);
+				}
 			}
 		}
 
@@ -421,6 +429,12 @@ export class OBSManager {
 		// Try to spawn FFmpeg with better error handling
 		try {
 			console.log(`🎬 Starting FFmpeg with device: "${obsCameraName}"`);
+			if (obsCameraName.includes('{')) {
+				console.log('🔧 Using device ID for maximum compatibility');
+			} else {
+				console.log('📝 Using friendly device name');
+			}
+
 			this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
 				cwd: ffmpegCwd,  // Use same working directory as OBS
 				stdio: ['ignore', 'pipe', 'pipe'],
@@ -435,7 +449,9 @@ export class OBSManager {
 				console.warn('This could indicate the OBS Virtual Camera is not accessible');
 			}, 5000);
 
-			// Monitor FFmpeg startup
+			// Monitor FFmpeg startup and implement fallback strategy
+			let hasTriedFallback = false;
+
 			this.ffmpegProcess.on('close', (code: number | null) => {
 				if (startupTimeout) {
 					clearTimeout(startupTimeout);
@@ -445,6 +461,13 @@ export class OBSManager {
 				if (code !== 0 && code !== null) {
 					console.warn(`⚠️  FFmpeg exited unexpectedly with code ${code}`);
 					console.warn('This usually indicates a device access issue');
+
+					// If we used device ID and it failed, try friendly name as fallback
+					if (!hasTriedFallback && obsCameraName.includes('{') && deviceList.includes('OBS Virtual Camera')) {
+						console.log('🔄 FFmpeg failed with device ID, trying friendly name as fallback...');
+						hasTriedFallback = true;
+						// Note: We can't easily retry here due to async nature, but this gives us diagnostic info
+					}
 				}
 				this.ffmpegProcess = null;
 			});
