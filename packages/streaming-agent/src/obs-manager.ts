@@ -322,10 +322,56 @@ export class OBSManager {
 		];
 
 		console.log('FFmpeg command:', 'ffmpeg', ffmpegArgs.join(' '));
+		console.log('Current working directory:', process.cwd());
+		console.log('PATH environment sample:', process.env.PATH?.split(';').slice(0, 3).join(';') + '...');
 
-		this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-			stdio: ['ignore', 'pipe', 'pipe']
-		});
+		// Use the same working directory as OBS for consistency
+		const obsPath = process.env.OBS_PATH || 'obs64.exe';
+		const ffmpegCwd = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
+
+		console.log('FFmpeg working directory will be:', ffmpegCwd);
+
+		// Quick check if FFmpeg is available
+		try {
+			const { spawn } = require('child_process');
+			const testProcess = spawn('ffmpeg', ['-version'], { stdio: 'ignore' });
+			await new Promise((resolve, reject) => {
+				testProcess.on('close', (code: number | null) => {
+					if (code === 0) {
+						console.log('✅ FFmpeg is available and working');
+						resolve(void 0);
+					} else {
+						reject(new Error(`FFmpeg exited with code ${code}`));
+					}
+				});
+				testProcess.on('error', reject);
+				// Timeout after 5 seconds
+				setTimeout(() => reject(new Error('FFmpeg test timeout')), 5000);
+			});
+		} catch (ffmpegTestError) {
+			const errorMessage = ffmpegTestError instanceof Error ? ffmpegTestError.message : String(ffmpegTestError);
+			console.warn('⚠️  FFmpeg availability test failed:', errorMessage);
+			console.warn('This might cause the streaming to fail');
+		}
+
+		// Try to spawn FFmpeg with better error handling
+		try {
+			this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+				cwd: ffmpegCwd,  // Use same working directory as OBS
+				stdio: ['ignore', 'pipe', 'pipe'],
+				env: { ...process.env }  // Pass through all environment variables
+			});
+
+			console.log('FFmpeg process spawned with PID:', this.ffmpegProcess.pid);
+
+		} catch (spawnError) {
+			console.error('Failed to spawn FFmpeg process:', spawnError);
+			console.error('Possible causes:');
+			console.error('1. FFmpeg is not installed');
+			console.error('2. FFmpeg is not in system PATH');
+			console.error('3. Working directory issue:', ffmpegCwd);
+			throw spawnError;
+		}
 
 		// Handle FFmpeg output
 		if (this.ffmpegProcess.stdout) {
