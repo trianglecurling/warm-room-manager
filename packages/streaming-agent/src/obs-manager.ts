@@ -256,20 +256,46 @@ export class OBSManager {
 	async startFFmpegStream(streamConfig: StreamConfig): Promise<void> {
 		console.log('Starting FFmpeg stream from OBS Virtual Camera to YouTube...');
 
-		// Build the exact FFmpeg command as specified in requirements
-		const ffmpegCommand = `ffmpeg -f dshow -rtbufsize 1000M -pix_fmt yuv420p -i video="OBS Virtual Camera" -itsoffset 1.35 -f dshow -rtbufsize 100M -i audio="DVS Receive  1-2 (Dante Virtual Soundcard)" -map 0:v -map 1:a -af volume=5dB -ac 2 -c:v hevc_amf -rc cqp -q 20 -b:v 15000k -maxrate 20000k -bufsize 45000k -vf scale=1920:1080,format=yuv420p -c:a aac -b:a 128k -g 120 -r 60 -f flv rtmp://a.rtmp.youtube.com/live2/${streamConfig.streamKey}`;
+		// Build the FFmpeg command as individual arguments for proper parsing
+		const ffmpegArgs = [
+			'-f', 'dshow',
+			'-rtbufsize', '1000M',
+			'-pix_fmt', 'yuv420p',
+			'-i', 'video=OBS Virtual Camera',
+			'-itsoffset', '1.35',
+			'-f', 'dshow',
+			'-rtbufsize', '100M',
+			'-i', 'audio=DVS Receive  1-2 (Dante Virtual Soundcard)',
+			'-map', '0:v',
+			'-map', '1:a',
+			'-af', 'volume=5dB',
+			'-ac', '2',
+			'-c:v', 'hevc_amf',
+			'-rc', 'cqp',
+			'-q', '20',
+			'-b:v', '15000k',
+			'-maxrate', '20000k',
+			'-bufsize', '45000k',
+			'-vf', 'scale=1920:1080,format=yuv420p',
+			'-c:a', 'aac',
+			'-b:a', '128k',
+			'-g', '120',
+			'-r', '60',
+			'-f', 'flv',
+			`rtmp://a.rtmp.youtube.com/live2/${streamConfig.streamKey}`
+		];
 
-		console.log('FFmpeg command:', ffmpegCommand);
+		console.log('FFmpeg command: ffmpeg', ffmpegArgs.join(' '));
 		console.log('Current working directory:', process.cwd());
 
-		// Spawn a command prompt and run the ffmpeg command directly
-		console.log('🎯 Spawning command prompt to run FFmpeg...');
+		// Spawn FFmpeg directly with arguments (not through cmd.exe)
+		console.log('🎯 Spawning FFmpeg directly...');
 		const { spawn } = require('child_process');
 
-		this.ffmpegProcess = spawn('cmd.exe', ['/c', ffmpegCommand], {
+		this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
 			stdio: ['ignore', 'pipe', 'pipe'],
 			detached: false,  // Don't detach so we can monitor it
-			windowsHide: true  // Hide the command prompt window
+			windowsHide: true  // Hide the console window
 		});
 
 		console.log('FFmpeg process spawned with PID:', this.ffmpegProcess?.pid);
