@@ -137,7 +137,7 @@ function stopHeartbeat() {
 }
 
 // Real OBS and FFmpeg streaming
-async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata) {
+async function startStreamingJob(jobId: string, config: any, streamMetadata?: StreamMetadata) {
 	try {
 		console.log(`Starting streaming job ${jobId}`);
 		console.log(`Stream metadata received:`, JSON.stringify(streamMetadata, null, 2));
@@ -156,30 +156,38 @@ async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata)
 			throw new Error('Missing YouTube stream configuration for FFmpeg');
 		}
 
-		// Determine scene name from stream metadata
+		// Determine scene name from stream key
 		let sceneName = 'SheetA'; // Default scene
-		console.log('🎭 Determining scene from streamContext:', streamMetadata.streamContext);
+		const streamKey = config?.streamKey;
+		console.log('🎭 Determining scene from streamKey:', streamKey);
 
-		if (streamMetadata.streamContext?.sheet) {
-			const sheetValue = streamMetadata.streamContext.sheet;
-			console.log('📄 Raw sheet value:', sheetValue);
+		if (streamKey) {
+			// Extract scene info from stream key (e.g., "sheetA", "sheetB", "sheetD", "vibes")
+			const lowerKey = streamKey.toLowerCase();
+			console.log('📄 Processing stream key:', lowerKey);
 
-			if (sheetValue === 'vibe') {
+			if (lowerKey === 'vibes') {
 				sceneName = 'IceShedVibes';
-				console.log('🎵 Mapped vibe to IceShedVibes');
-			} else if (['A', 'B', 'C', 'D'].includes(sheetValue.toUpperCase())) {
-				// Map A,B,C,D to SheetA, SheetB, SheetC, SheetD
-				const sheetLetter = sheetValue.toUpperCase();
-				if (sheetLetter === 'A') sceneName = 'SheetA';
-				else if (sheetLetter === 'B') sceneName = 'SheetB';
-				else if (sheetLetter === 'C') sceneName = 'SheetC';
-				else if (sheetLetter === 'D') sceneName = 'SheetD';
-				console.log(`🎯 Mapped ${sheetValue} to ${sceneName}`);
+				console.log('🎵 Mapped vibes to IceShedVibes');
+			} else if (lowerKey.startsWith('sheet')) {
+				// Extract letter from "sheetA", "sheetB", etc.
+				const sheetLetter = lowerKey.replace('sheet', '').toUpperCase();
+				console.log('📝 Extracted sheet letter:', sheetLetter);
+
+				if (['A', 'B', 'C', 'D'].includes(sheetLetter)) {
+					if (sheetLetter === 'A') sceneName = 'SheetA';
+					else if (sheetLetter === 'B') sceneName = 'SheetB';
+					else if (sheetLetter === 'C') sceneName = 'SheetC';
+					else if (sheetLetter === 'D') sceneName = 'SheetD';
+					console.log(`🎯 Mapped ${streamKey} to ${sceneName}`);
+				} else {
+					console.log(`⚠️ Unknown sheet letter: ${sheetLetter}, using default SheetA`);
+				}
 			} else {
-				console.log(`⚠️ Unknown sheet value: ${sheetValue}, using default SheetA`);
+				console.log(`⚠️ Unknown stream key format: ${streamKey}, using default SheetA`);
 			}
 		} else {
-			console.log('⚠️ No streamContext.sheet found, using default SheetA');
+			console.log('⚠️ No streamKey found, using default SheetA');
 		}
 
 		console.log('🎬 Final scene name:', sceneName);
@@ -262,7 +270,7 @@ function onAssignStart(
 	send(Msg.AgentAssignAck, { jobId, accepted: true }, msg.msgId);
 
 	// Start streaming job asynchronously
-	startStreamingJob(jobId, streamMetadata);
+	startStreamingJob(jobId, config, streamMetadata);
 }
 
 function onJobStop(msg: WSMessage<{ jobId: string; reason?: string; deadlineMs?: number }>) {
