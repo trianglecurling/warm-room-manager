@@ -183,10 +183,13 @@ async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata)
 		}, sceneName);
 
 		console.log(`Streaming job ${jobId} started successfully (OBS Virtual Camera + FFmpeg)`);
+		state = "RUNNING";
 		send(Msg.AgentJobUpdate, { jobId, status: "RUNNING" as JobStatus });
 
 	} catch (error) {
 		console.error(`Failed to start streaming job ${jobId}:`, error);
+		state = "IDLE";
+		currentJobId = null;
 		send(Msg.AgentJobStopped, {
 			jobId,
 			status: "FAILED" as const,
@@ -208,10 +211,13 @@ async function stopStreamingJob(jobId: string, reason?: string) {
 		}
 
 		currentJobId = null;
+		state = "IDLE";
 		send(Msg.AgentJobStopped, { jobId, status: "STOPPED" as const });
 
 	} catch (error) {
 		console.error(`Error stopping streaming job ${jobId}:`, error);
+		currentJobId = null;
+		state = "IDLE";
 		send(Msg.AgentJobStopped, {
 			jobId,
 			status: "FAILED" as const,
