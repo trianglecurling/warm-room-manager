@@ -80,7 +80,7 @@ export class OBSManager {
 	async startOBS(sceneName: string = 'SheetA'): Promise<void> {
 		const obsPath = process.env.OBS_PATH || 'obs64.exe';
 
-		console.log('Starting OBS with path:', obsPath, 'and scene:', sceneName);
+		console.log('🏁 Starting OBS with path:', obsPath, 'and scene:', sceneName);
 		const { spawn } = require('child_process');
 
 		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
@@ -152,9 +152,11 @@ export class OBSManager {
 		try {
 			// Start OBS if not already running, with the correct scene
 			if (!this.isConnected) {
+				console.log('🎬 OBS not connected, starting OBS with scene:', sceneName);
 				await this.startOBS(sceneName);
 			} else {
 				// If OBS is already running, just switch to the correct scene
+				console.log('🔄 OBS already connected, switching to scene:', sceneName);
 				await this.setCurrentScene(sceneName);
 			}
 

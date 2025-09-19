@@ -158,18 +158,31 @@ async function startStreamingJob(jobId: string, streamMetadata?: StreamMetadata)
 
 		// Determine scene name from stream metadata
 		let sceneName = 'SheetA'; // Default scene
+		console.log('🎭 Determining scene from streamContext:', streamMetadata.streamContext);
+
 		if (streamMetadata.streamContext?.sheet) {
-			if (streamMetadata.streamContext.sheet === 'vibe') {
+			const sheetValue = streamMetadata.streamContext.sheet;
+			console.log('📄 Raw sheet value:', sheetValue);
+
+			if (sheetValue === 'vibe') {
 				sceneName = 'IceShedVibes';
-			} else if (['A', 'B', 'C', 'D'].includes(streamMetadata.streamContext.sheet.toUpperCase())) {
+				console.log('🎵 Mapped vibe to IceShedVibes');
+			} else if (['A', 'B', 'C', 'D'].includes(sheetValue.toUpperCase())) {
 				// Map A,B,C,D to SheetA, SheetB, SheetC, SheetD
-				const sheetLetter = streamMetadata.streamContext.sheet.toUpperCase();
+				const sheetLetter = sheetValue.toUpperCase();
 				if (sheetLetter === 'A') sceneName = 'SheetA';
 				else if (sheetLetter === 'B') sceneName = 'SheetB';
 				else if (sheetLetter === 'C') sceneName = 'SheetC';
 				else if (sheetLetter === 'D') sceneName = 'SheetD';
+				console.log(`🎯 Mapped ${sheetValue} to ${sceneName}`);
+			} else {
+				console.log(`⚠️ Unknown sheet value: ${sheetValue}, using default SheetA`);
 			}
+		} else {
+			console.log('⚠️ No streamContext.sheet found, using default SheetA');
 		}
+
+		console.log('🎬 Final scene name:', sceneName);
 
 		// Start streaming to YouTube (OBS will be started automatically with correct scene)
 		await obsManager.startStreaming({
