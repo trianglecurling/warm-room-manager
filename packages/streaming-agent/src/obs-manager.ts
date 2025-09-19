@@ -18,6 +18,38 @@ export class OBSManager {
 	private isConnected = false;
 	private currentScene = 'SheetA';
 
+	/**
+	 * Get the correct audio source for the current scene
+	 */
+	private getAudioSourceForScene(): string {
+		let audioSource: string;
+
+		switch (this.currentScene) {
+			case 'SheetA':
+				audioSource = 'DVS Receive  1-2 (Dante Virtual Soundcard)';
+				break;
+			case 'SheetB':
+				audioSource = 'DVS Receive  3-4 (Dante Virtual Soundcard)';
+				break;
+			case 'SheetC':
+				audioSource = 'DVS Receive  5-6 (Dante Virtual Soundcard)';
+				break;
+			case 'SheetD':
+				audioSource = 'DVS Receive  7-8 (Dante Virtual Soundcard)';
+				break;
+			case 'IceShedVibes':
+				audioSource = 'DVS Receive  9-10 (Dante Virtual Soundcard)';
+				break;
+			default:
+				console.warn(`Unknown scene: ${this.currentScene}, defaulting to VibeStream audio`);
+				audioSource = 'DVS Receive  9-10 (Dante Virtual Soundcard)';
+				break;
+		}
+
+		console.log(`🎵 Audio source mapping for ${this.currentScene}: ${audioSource}`);
+		return audioSource;
+	}
+
 	constructor(config: OBSConfig = { host: 'localhost', port: 4455 }) {
 		this.obs = new OBSWebSocket();
 
@@ -290,6 +322,10 @@ export class OBSManager {
 		console.log('Starting FFmpeg stream from OBS Virtual Camera to YouTube...');
 
 		// Build the FFmpeg command as individual arguments for proper parsing
+		// Get the correct audio source for the current scene
+		const audioSource = this.getAudioSourceForScene();
+		console.log(`🎵 Using audio source for scene ${this.currentScene}: ${audioSource}`);
+
 		const ffmpegArgs = [
 			'-f', 'dshow',
 			'-rtbufsize', '1000M',
@@ -298,7 +334,7 @@ export class OBSManager {
 			'-itsoffset', '1.35',
 			'-f', 'dshow',
 			'-rtbufsize', '100M',
-			'-i', 'audio=DVS Receive  1-2 (Dante Virtual Soundcard)',
+			'-i', `audio=${audioSource}`,
 			'-map', '0:v',
 			'-map', '1:a',
 			'-af', 'volume=5dB',

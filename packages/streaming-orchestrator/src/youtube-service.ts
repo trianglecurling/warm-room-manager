@@ -58,7 +58,7 @@ export class YouTubeService {
 						scheduledStartTime: new Date(Date.now() + 60000).toISOString(), // Start in 1 minute
 					},
 					status: {
-						privacyStatus: 'unlisted', // As requested for testing
+						privacyStatus: 'public',
 						selfDeclaredMadeForKids: false, // Explicitly set as not made for kids
 					},
 					contentDetails: {
@@ -207,17 +207,20 @@ export class YouTubeService {
 	 */
 	static generateStreamTitle(): string {
 		const now = new Date();
-		const timestamp = now.toLocaleString('en-US', {
-			month: 'short',
-			day: 'numeric',
-			hour: '2-digit',
+		const month = now.getMonth() + 1;
+		const day = now.getDate();
+		const year = now.getFullYear();
+		const timeString = now.toLocaleString('en-US', {
+			hour: 'numeric',
 			minute: '2-digit',
+			hour12: true
 		});
-		return `Live Sports Stream - ${timestamp}`;
+
+		return `Triangle Curling - Live Stream - ${month}/${day}/${year} ${timeString}`;
 	}
 
 	static generateStreamDescription(): string {
-		return 'This is an automated sports live stream created by the Stream Control system. Join us for an exciting sports broadcast!';
+		return 'To watch other sheets, visit https://www.youtube.com/@TriangleCurling/streams';
 	}
 }
 

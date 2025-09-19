@@ -912,14 +912,11 @@ async function schedule() {
 function generateStreamTitle(context: StreamContext): string {
 	const parts: string[] = [];
 
-	// Add context
+	// Add context name
 	if (context.context) {
 		parts.push(context.context);
-	}
-
-	// Add draw number (optional)
-	if (context.drawNumber) {
-		parts.push(`Draw ${context.drawNumber}`);
+	} else {
+		parts.push('Triangle Curling');
 	}
 
 	// Add sheet identifier
@@ -929,43 +926,28 @@ function generateStreamTitle(context: StreamContext): string {
 		} else {
 			parts.push(`Sheet ${context.sheet}`);
 		}
+	} else {
+		parts.push('Live Stream');
 	}
 
-	// Add teams (if both are provided)
-	if (context.team1 && context.team2) {
-		parts.push(`(${context.team1} v. ${context.team2})`);
-	}
+	// Add date and time in format: m/d/yyyy h:mm am/pm
+	const now = new Date();
+	const month = now.getMonth() + 1;
+	const day = now.getDate();
+	const year = now.getFullYear();
+	const timeString = now.toLocaleString('en-US', {
+		hour: 'numeric',
+		minute: '2-digit',
+		hour12: true
+	});
 
-	// Add today's date
-	const today = new Date();
-	const formattedDate = `${today.getMonth() + 1}/${today.getDate()}/${today.getFullYear()}`;
-	parts.push(formattedDate);
+	parts.push(`${month}/${day}/${year} ${timeString}`);
 
 	return parts.join(' - ');
 }
 
 function generateStreamDescription(context: StreamContext): string {
-	let description = 'This is an automated live stream created by the Stream Control system.';
-
-	if (context.context) {
-		description += ` Streaming ${context.context.toLowerCase()}.`;
-	}
-
-	if (context.team1 && context.team2) {
-		description += ` Watch ${context.team1} vs ${context.team2} live!`;
-	}
-
-	if (context.sheet) {
-		if (context.sheet === 'vibe') {
-			description += ' Tune in for the vibe stream experience.';
-		} else {
-			description += ` Catch all the action from Sheet ${context.sheet}.`;
-		}
-	}
-
-	description += ' Join us for an exciting broadcast!';
-
-	return description;
+	return 'To watch other sheets, visit https://www.youtube.com/@TriangleCurling/streams';
 }
 
 // Kick scheduler periodically

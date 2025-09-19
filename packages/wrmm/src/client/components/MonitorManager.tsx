@@ -170,6 +170,18 @@ export const MonitorManager = () => {
       if (live) {
         // Start stream - create a job
         const stream = streams[key];
+        // Convert StreamKey to sheet identifier for streamContext
+        const getSheetIdentifier = (streamKey: StreamKey): 'A' | 'B' | 'C' | 'D' | 'vibe' => {
+          switch (streamKey) {
+            case 'sheetA': return 'A';
+            case 'sheetB': return 'B';
+            case 'sheetC': return 'C';
+            case 'sheetD': return 'D';
+            case 'vibe': return 'vibe';
+            default: return 'A';
+          }
+        };
+
         const jobRequest = {
           inlineConfig: {
             streamKey: key,
@@ -179,6 +191,12 @@ export const MonitorManager = () => {
             muted: stream.muted,
             publicUrl: stream.publicUrl,
             adminUrl: stream.adminUrl,
+          },
+          streamContext: {
+            context: selectedContext || 'Triangle Curling',
+            sheet: getSheetIdentifier(key),
+            team1: stream.team1 || undefined,
+            team2: stream.team2 || undefined,
           },
           idempotencyKey: `stream-${key}-${Date.now()}`,
           restartPolicy: 'never' as const,
