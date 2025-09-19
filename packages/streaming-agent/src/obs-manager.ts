@@ -292,12 +292,71 @@ export class OBSManager {
 	async startFFmpegStream(streamConfig: StreamConfig): Promise<void> {
 		console.log('Starting FFmpeg stream from OBS Virtual Camera to YouTube...');
 
+		let deviceList = '';
+
+		// First, list available video devices to see what's actually available
+		console.log('🔍 Checking available video devices...');
+		try {
+			const { spawn } = require('child_process');
+			const obsPath = process.env.OBS_PATH || 'obs64.exe';
+			const ffmpegCwd = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
+
+			const listDevicesProcess = spawn('ffmpeg', ['-f', 'dshow', '-list_devices', 'true', '-i', 'dummy'], {
+				cwd: ffmpegCwd,
+				stdio: ['ignore', 'pipe', 'pipe']
+			});
+
+			listDevicesProcess.stdout?.on('data', (data: Buffer) => {
+				deviceList += data.toString();
+			});
+			listDevicesProcess.stderr?.on('data', (data: Buffer) => {
+				deviceList += data.toString();
+			});
+
+			await new Promise((resolve, reject) => {
+				listDevicesProcess.on('close', (code: number | null) => {
+					console.log('📋 Available video devices:');
+					console.log(deviceList);
+					if (deviceList.includes('OBS Virtual Camera')) {
+						console.log('✅ OBS Virtual Camera found in device list');
+						resolve(void 0);
+					} else {
+						console.warn('⚠️  OBS Virtual Camera NOT found in device list');
+						console.warn('This might explain why FFmpeg cannot access it');
+						resolve(void 0); // Don't fail, just warn
+					}
+				});
+				listDevicesProcess.on('error', (error: Error) => {
+					console.warn('⚠️  Could not list video devices:', error.message);
+					resolve(void 0); // Don't fail, just warn
+				});
+				setTimeout(() => {
+					listDevicesProcess.kill();
+					console.warn('⚠️  Device listing timed out');
+					resolve(void 0);
+				}, 10000);
+			});
+		} catch (deviceError) {
+			console.warn('⚠️  Error checking video devices:', deviceError);
+		}
+
+		// Try to find the correct OBS Virtual Camera device name from the device list
+		let obsCameraName = 'OBS Virtual Camera'; // Default name
+		if (deviceList && deviceList.includes('OBS')) {
+			// Try to extract the exact device name from the FFmpeg output
+			const obsMatch = deviceList.match(/\[dshow @ [^\]]+\] "([^"]*OBS[^"]*)"/);
+			if (obsMatch && obsMatch[1]) {
+				obsCameraName = obsMatch[1];
+				console.log(`🔍 Found OBS camera device: "${obsCameraName}"`);
+			}
+		}
+
 		// Exact FFmpeg command as specified in requirements
 		const ffmpegArgs = [
 			'-f', 'dshow',
 			'-rtbufsize', '1000M',
 			'-pix_fmt', 'yuv420p',
-			'-i', 'video="OBS Virtual Camera"',
+			'-i', `video="${obsCameraName}"`,
 			'-itsoffset', '1.35',
 			'-f', 'dshow',
 			'-rtbufsize', '100M',
