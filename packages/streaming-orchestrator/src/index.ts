@@ -624,6 +624,13 @@ wssAgents.on("connection", (ws) => {
 					timers: {},
 				};
 				agents.set(agentId, agent);
+			} else {
+				// Check if the existing agent is still connected
+				if (agent.ws && agent.ws.readyState === WebSocket.OPEN && agent.state !== "OFFLINE") {
+					console.warn(`Rejecting duplicate agent connection for ID ${agentId} from ${name}`);
+					ws.close(4002, "Agent ID already in use by another active agent");
+					return;
+				}
 			}
 			agent.ws = ws;
 			agent.name = name;

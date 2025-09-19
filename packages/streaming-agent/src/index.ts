@@ -7,7 +7,7 @@ import { OBSManager } from "./obs-manager";
 
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? "ws://localhost:8080/agent";
 const AGENT_TOKEN = process.env.AGENT_TOKEN ?? "dev-shared-token";
-const AGENT_ID = process.env.AGENT_ID || `agent-${hostname()}-${randomUUID().slice(0, 8)}`;
+const AGENT_ID = process.env.AGENT_ID || `agent-${hostname()}-${randomUUID()}`;
 const AGENT_NAME = process.env.AGENT_NAME || hostname();
 const VERSION = "0.1.0";
 
@@ -162,13 +162,13 @@ async function startStreamingJob(jobId: string, config: any, streamMetadata?: St
 		console.log('🎭 Determining scene from streamKey:', streamKey);
 
 		if (streamKey) {
-			// Extract scene info from stream key (e.g., "sheetA", "sheetB", "sheetD", "vibes")
+			// Extract scene info from stream key (e.g., "sheetA", "sheetB", "sheetD", "vibe")
 			const lowerKey = streamKey.toLowerCase();
 			console.log('📄 Processing stream key:', lowerKey);
 
-			if (lowerKey === 'vibes') {
+			if (lowerKey === 'vibe') {
 				sceneName = 'IceShedVibes';
-				console.log('🎵 Mapped vibes to IceShedVibes');
+				console.log('🎵 Mapped vibe to IceShedVibes');
 			} else if (lowerKey.startsWith('sheet')) {
 				// Extract letter from "sheetA", "sheetB", etc.
 				const sheetLetter = lowerKey.replace('sheet', '').toUpperCase();
