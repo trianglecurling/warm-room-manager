@@ -319,7 +319,12 @@ export class OBSManager {
 					console.log(deviceList);
 					if (deviceList.includes('OBS Virtual Camera')) {
 						console.log('✅ OBS Virtual Camera found in device list');
-						resolve(void 0);
+						console.log('⏳ Waiting additional 3 seconds for device to be fully ready...');
+						// Add extra delay to ensure the device is fully ready
+						setTimeout(() => {
+							console.log('🎯 Device should now be ready for FFmpeg access');
+							resolve(void 0);
+						}, 3000);
 					} else {
 						console.warn('⚠️  OBS Virtual Camera NOT found in device list');
 						console.warn('This might explain why FFmpeg cannot access it');
@@ -415,6 +420,7 @@ export class OBSManager {
 
 		// Try to spawn FFmpeg with better error handling
 		try {
+			console.log(`🎬 Starting FFmpeg with device: "${obsCameraName}"`);
 			this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
 				cwd: ffmpegCwd,  // Use same working directory as OBS
 				stdio: ['ignore', 'pipe', 'pipe'],
@@ -422,6 +428,26 @@ export class OBSManager {
 			});
 
 			console.log('FFmpeg process spawned with PID:', this.ffmpegProcess.pid);
+
+			// Clear timeout if FFmpeg starts successfully
+			let startupTimeout: NodeJS.Timeout | null = setTimeout(() => {
+				console.warn('⚠️  FFmpeg startup timeout - device may not be ready');
+				console.warn('This could indicate the OBS Virtual Camera is not accessible');
+			}, 5000);
+
+			// Monitor FFmpeg startup
+			this.ffmpegProcess.on('close', (code: number | null) => {
+				if (startupTimeout) {
+					clearTimeout(startupTimeout);
+					startupTimeout = null;
+				}
+				console.log(`FFmpeg process exited with code ${code}`);
+				if (code !== 0 && code !== null) {
+					console.warn(`⚠️  FFmpeg exited unexpectedly with code ${code}`);
+					console.warn('This usually indicates a device access issue');
+				}
+				this.ffmpegProcess = null;
+			});
 
 		} catch (spawnError) {
 			console.error('Failed to spawn FFmpeg process:', spawnError);
@@ -442,13 +468,6 @@ export class OBSManager {
 		if (this.ffmpegProcess.stderr) {
 			this.ffmpegProcess.stderr.on('data', (data) => {
 				console.log('FFmpeg stderr:', data.toString());
-			});
-		}
-
-		if (this.ffmpegProcess) {
-			this.ffmpegProcess.on('close', (code) => {
-				console.log(`FFmpeg process exited with code ${code}`);
-				this.ffmpegProcess = null;
 			});
 		}
 
