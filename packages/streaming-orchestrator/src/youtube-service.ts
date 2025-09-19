@@ -58,7 +58,7 @@ export class YouTubeService {
 						scheduledStartTime: new Date(Date.now() + 60000).toISOString(), // Start in 1 minute
 					},
 					status: {
-						privacyStatus: 'unlisted',
+						privacyStatus: 'public',
 						selfDeclaredMadeForKids: false, // Explicitly set as not made for kids
 					},
 					contentDetails: {
@@ -125,7 +125,7 @@ export class YouTubeService {
 				streamId: stream.id || undefined,
 				streamKey: stream.cdn?.ingestionInfo?.streamName || undefined,
 				streamUrl: stream.cdn?.ingestionInfo?.ingestionAddress || undefined,
-				privacyStatus: 'unlisted',
+				privacyStatus: 'public',
 				scheduledStartTime: broadcast.snippet?.scheduledStartTime || undefined,
 				channelId: broadcast.snippet?.channelId || undefined,
 				videoId: broadcast.id || undefined, // Broadcast ID is also the video ID

@@ -128,6 +128,7 @@ export class OBSManager {
 			'--collection', 'auto4k',
 			'--scene', sceneName,
 			'--multi',
+			'--minimize-to-tray',
 			'--disable-shutdown-check',
 			'--disable-updater',
 			'--startvirtualcam'
