@@ -1,6 +1,5 @@
-import OBSWebSocket from 'obs-websocket-js';
-import { spawn, ChildProcess } from 'child_process';
-import { StreamMetadata } from '@warm-room-manager/shared';
+import { OBSWebSocket } from 'obs-websocket-js';
+import { ChildProcess } from 'child_process';
 
 export interface OBSConfig {
 	host: string;
@@ -18,14 +17,8 @@ export class OBSManager {
 	private ffmpegProcess: ChildProcess | null = null;
 	private isConnected = false;
 	private currentScene = 'SheetA';
-	private config: OBSConfig;
-	private websocketPassword: string;
-	private preferDeviceId = true; // Start with device ID, fallback to friendly name if it fails
 
 	constructor(config: OBSConfig = { host: 'localhost', port: 4455 }) {
-		this.config = config;
-		// Generate a random password for WebSocket authentication
-		this.websocketPassword = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 		this.obs = new OBSWebSocket();
 
 		this.obs.on('ConnectionOpened', () => {
@@ -45,11 +38,8 @@ export class OBSManager {
 
 	async connect(): Promise<void> {
 		try {
-			const { obsWebSocketVersion } = await this.obs.connect(
-				`ws://${this.config.host}:${this.config.port}`,
-				this.websocketPassword
-			);
-			console.log(`OBS WebSocket connected (version: ${obsWebSocketVersion})`);
+			await this.obs.connect(`ws://localhost:4455`, 'randompassword123');
+			console.log('OBS WebSocket connected successfully');
 		} catch (error) {
 			console.error('Failed to connect to OBS:', error);
 			throw error;
@@ -61,7 +51,6 @@ export class OBSManager {
 
 		for (let attempt = 1; attempt <= maxRetries; attempt++) {
 			try {
-				console.log(`WebSocket connection attempt ${attempt}/${maxRetries}...`);
 				await this.connect();
 				console.log(`✅ OBS WebSocket connected successfully on attempt ${attempt}`);
 				return; // Success, exit the retry loop
@@ -90,25 +79,19 @@ export class OBSManager {
 
 	async startOBS(): Promise<void> {
 		const obsPath = process.env.OBS_PATH || 'obs64.exe';
-		console.log(`Starting OBS using path: ${obsPath}`);
 
-		// Extract OBS directory from the executable path
+		console.log('Starting OBS with path:', obsPath);
+		const { spawn } = require('child_process');
+
 		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
-		console.log(`OBS working directory: ${obsDir}`);
-
-		// Launch OBS with comprehensive launch parameters
-		console.log(`OBS WebSocket port: ${this.config.port}, password: ${this.websocketPassword}`);
-		console.log(`OBS starting scene: ${this.currentScene}`);
-		console.log(`OBS virtual camera will start automatically via --startvirtualcam`);
+		console.log('OBS working directory:', obsDir);
 
 		const obsProcess = spawn(obsPath, [
-			`--websocket_port=${this.config.port}`,
-			`--websocket_password=${this.websocketPassword}`,
-			'--collection',
-			'auto4k',
-			'--scene',
-			this.currentScene,
-			'--multi', // don't warn when launching multiple instances
+			'--websocket_port=4455',
+			'--websocket_password=randompassword123',
+			'--collection', 'auto4k',
+			'--scene', 'SheetA',
+			'--multi',
 			'--disable-shutdown-check',
 			'--disable-updater',
 			'--startvirtualcam'
@@ -120,13 +103,12 @@ export class OBSManager {
 
 		obsProcess.unref();
 
-		// Handle OBS process errors
-		obsProcess.on('error', (error) => {
+		obsProcess.on('error', (error: Error) => {
 			console.error('Failed to start OBS process:', error);
 			throw new Error(`OBS startup failed: ${error.message}`);
 		});
 
-		obsProcess.on('exit', (code, signal) => {
+		obsProcess.on('exit', (code: number | null, signal: string | null) => {
 			console.log(`OBS process exited with code: ${code}, signal: ${signal}`);
 			if (code !== 0 && code !== null) {
 				console.warn(`OBS exited unexpectedly with code ${code}`);
@@ -154,21 +136,10 @@ export class OBSManager {
 
 		this.cleanup();
 
-		// Try to close OBS gracefully (no streaming to stop since we use FFmpeg)
-		try {
-			if (this.isConnected) {
-				// OBS might still be running, just disconnect WebSocket
-				await this.obs.disconnect();
-			}
-		} catch (error) {
-			console.warn('Failed to disconnect OBS gracefully:', error);
-		}
-
 		// Force close OBS process if needed
 		try {
-			const obsPath = process.env.OBS_PATH || 'obs64.exe';
-			// Extract just the executable name for taskkill (e.g., "obs64.exe" from full path)
-			const obsExeName = obsPath.split('\\').pop() || 'obs64.exe';
+			const { spawn } = require('child_process');
+			const obsExeName = 'obs64.exe';
 			console.log(`Stopping OBS process: ${obsExeName}`);
 			spawn('taskkill', ['/f', '/im', obsExeName], {
 				stdio: 'ignore'
@@ -177,7 +148,6 @@ export class OBSManager {
 			console.warn('Failed to kill OBS process:', error);
 		}
 	}
-
 
 	async startStreaming(streamConfig: StreamConfig, sceneName = 'Scene'): Promise<void> {
 		if (!this.isConnected) {
@@ -188,8 +158,6 @@ export class OBSManager {
 			// Switch to the specified scene
 			await this.setCurrentScene(sceneName);
 
-			// Virtual camera is already started via --startvirtualcam launch parameter
-			// Just start FFmpeg streaming from OBS virtual camera to YouTube
 			await this.startFFmpegStream(streamConfig);
 
 			console.log('FFmpeg streaming from OBS virtual camera started successfully');
@@ -201,7 +169,6 @@ export class OBSManager {
 
 	async stopStreaming(): Promise<void> {
 		try {
-			// Stop FFmpeg streaming first
 			await this.stopFFmpegStream();
 
 			// Virtual camera will stop automatically when OBS shuts down
@@ -238,16 +205,14 @@ export class OBSManager {
 		try {
 			// Get all audio sources and mute them
 			const { inputs } = await this.obs.call('GetInputList');
+			console.log('Found audio inputs:', inputs.length);
 
 			for (const input of inputs) {
 				try {
-					const inputName = input.inputName as string;
-					if (inputName) {
-						await this.obs.call('SetInputMute', {
-							inputName,
-							inputMuted: true
-						});
-					}
+					await this.obs.call('SetInputMute', {
+						inputName: (input as any).inputName,
+						inputMuted: true
+					});
 				} catch (error) {
 					console.warn(`Failed to mute input:`, error);
 				}
@@ -268,16 +233,14 @@ export class OBSManager {
 		try {
 			// Get all audio sources and unmute them
 			const { inputs } = await this.obs.call('GetInputList');
+			console.log('Found audio inputs:', inputs.length);
 
 			for (const input of inputs) {
 				try {
-					const inputName = input.inputName as string;
-					if (inputName) {
-						await this.obs.call('SetInputMute', {
-							inputName,
-							inputMuted: false
-						});
-					}
+					await this.obs.call('SetInputMute', {
+						inputName: (input as any).inputName,
+						inputMuted: false
+					});
 				} catch (error) {
 					console.warn(`Failed to unmute input:`, error);
 				}
@@ -293,265 +256,64 @@ export class OBSManager {
 	async startFFmpegStream(streamConfig: StreamConfig): Promise<void> {
 		console.log('Starting FFmpeg stream from OBS Virtual Camera to YouTube...');
 
-		let deviceList = '';
+		// Build the exact FFmpeg command as specified in requirements
+		const ffmpegCommand = `ffmpeg -f dshow -rtbufsize 1000M -pix_fmt yuv420p -i video="OBS Virtual Camera" -itsoffset 1.35 -f dshow -rtbufsize 100M -i audio="DVS Receive  1-2 (Dante Virtual Soundcard)" -map 0:v -map 1:a -af volume=5dB -ac 2 -c:v hevc_amf -rc cqp -q 20 -b:v 15000k -maxrate 20000k -bufsize 45000k -vf scale=1920:1080,format=yuv420p -c:a aac -b:a 128k -g 120 -r 60 -f flv rtmp://a.rtmp.youtube.com/live2/${streamConfig.streamKey}`;
 
-		// Set up working directory for FFmpeg
-		const obsPath = process.env.OBS_PATH || 'obs64.exe';
-		const ffmpegCwd = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
-
-		// First, list available video devices to see what's actually available
-		console.log('🔍 Checking available video devices...');
-		try {
-			const { spawn } = require('child_process');
-
-			const listDevicesProcess = spawn('ffmpeg', ['-f', 'dshow', '-list_devices', 'true', '-i', 'dummy'], {
-				cwd: ffmpegCwd,
-				stdio: ['ignore', 'pipe', 'pipe']
-			});
-
-			listDevicesProcess.stdout?.on('data', (data: Buffer) => {
-				deviceList += data.toString();
-			});
-			listDevicesProcess.stderr?.on('data', (data: Buffer) => {
-				deviceList += data.toString();
-			});
-
-			await new Promise((resolve, reject) => {
-				listDevicesProcess.on('close', (code: number | null) => {
-					console.log('📋 Available video devices:');
-					console.log(deviceList);
-					if (deviceList.includes('OBS Virtual Camera')) {
-						console.log('✅ OBS Virtual Camera found in device list');
-						console.log('⏳ Waiting additional 3 seconds for device to be fully ready...');
-						// Add extra delay to ensure the device is fully ready
-						setTimeout(() => {
-							console.log('🎯 Device should now be ready for FFmpeg access');
-							resolve(void 0);
-						}, 3000);
-					} else {
-						console.warn('⚠️  OBS Virtual Camera NOT found in device list');
-						console.warn('This might explain why FFmpeg cannot access it');
-						resolve(void 0); // Don't fail, just warn
-					}
-				});
-				listDevicesProcess.on('error', (error: Error) => {
-					console.warn('⚠️  Could not list video devices:', error.message);
-					resolve(void 0); // Don't fail, just warn
-				});
-				setTimeout(() => {
-					listDevicesProcess.kill();
-					console.warn('⚠️  Device listing timed out');
-					resolve(void 0);
-				}, 10000);
-			});
-		} catch (deviceError) {
-			console.warn('⚠️  Error checking video devices:', deviceError);
-		}
-
-		// Try to find the correct OBS Virtual Camera device name from the device list
-		let obsCameraName = 'OBS Virtual Camera'; // Default name
-
-		if (deviceList && deviceList.includes('OBS')) {
-			if (this.preferDeviceId) {
-				// Try device ID first (preferred for reliability)
-				const deviceIdMatch = deviceList.match(/Alternative name "([^"]*\{[^}]+\}[^"]*)"/);
-				if (deviceIdMatch && deviceIdMatch[1]) {
-					obsCameraName = deviceIdMatch[1];
-					console.log(`🔍 Found OBS camera device ID: "${obsCameraName}"`);
-					console.log('🎯 Using device ID for maximum compatibility');
-				} else {
-					console.log('⚠️ Device ID not found, falling back to friendly name');
-					this.preferDeviceId = false; // Don't try device ID next time
-					const obsMatch = deviceList.match(/\[dshow @ [^\]]+\] "([^"]*OBS[^"]*)"/);
-					if (obsMatch && obsMatch[1]) {
-						obsCameraName = obsMatch[1];
-						console.log(`🔍 Found OBS camera device (friendly name): "${obsCameraName}"`);
-					}
-				}
-			} else {
-				// Use friendly name (fallback mode)
-				const obsMatch = deviceList.match(/\[dshow @ [^\]]+\] "([^"]*OBS[^"]*)"/);
-				if (obsMatch && obsMatch[1]) {
-					obsCameraName = obsMatch[1];
-					console.log(`🔍 Found OBS camera device (friendly name): "${obsCameraName}"`);
-					console.log('📝 Using friendly name (device ID failed previously)');
-				}
-			}
-		}
-
-		// Exact FFmpeg command as specified in requirements
-		const ffmpegArgs = [
-			'-f', 'dshow',
-			'-rtbufsize', '1000M',
-			'-pix_fmt', 'yuv420p',
-			'-i', `video="${obsCameraName}"`,
-			'-itsoffset', '1.35',
-			'-f', 'dshow',
-			'-rtbufsize', '100M',
-			'-i', 'audio="DVS Receive  1-2 (Dante Virtual Soundcard)"',
-			'-map', '0:v',
-			'-map', '1:a',
-			'-af', 'volume=5dB',
-			'-ac', '2',
-			'-c:v', 'hevc_amf',
-			'-rc', 'cqp',
-			'-q', '20',
-			'-b:v', '15000k',
-			'-maxrate', '20000k',
-			'-bufsize', '45000k',
-			'-vf', 'scale=1920:1080,format=yuv420p',
-			'-c:a', 'aac',
-			'-b:a', '128k',
-			'-g', '120',
-			'-r', '60',
-			'-f', 'flv',
-			`rtmp://${streamConfig.streamUrl.replace('rtmp://', '')}/${streamConfig.streamKey}`
-		];
-
-		console.log('FFmpeg command:', 'ffmpeg', ffmpegArgs.join(' '));
+		console.log('FFmpeg command:', ffmpegCommand);
 		console.log('Current working directory:', process.cwd());
-		console.log('PATH environment sample:', process.env.PATH?.split(';').slice(0, 3).join(';') + '...');
 
-		// Test the exact FFmpeg command manually before spawning
-		console.log('🧪 Testing FFmpeg command manually...');
-		try {
-			const { spawn } = require('child_process');
-			const testCommand = spawn('ffmpeg', ffmpegArgs.slice(0, 6), { // Just test the video input part
-				cwd: ffmpegCwd,  // ffmpegCwd is declared at the top of the function
-				stdio: ['ignore', 'pipe', 'pipe']
-			});
+		// Spawn a command prompt and run the ffmpeg command directly
+		console.log('🎯 Spawning command prompt to run FFmpeg...');
+		const { spawn } = require('child_process');
 
-			let testOutput = '';
-			let testError = '';
+		this.ffmpegProcess = spawn('cmd.exe', ['/c', ffmpegCommand], {
+			stdio: ['ignore', 'pipe', 'pipe'],
+			detached: false,  // Don't detach so we can monitor it
+			windowsHide: true  // Hide the command prompt window
+		});
 
-			testCommand.stdout?.on('data', (data: Buffer) => {
-				testOutput += data.toString();
-			});
-
-			testCommand.stderr?.on('data', (data: Buffer) => {
-				testError += data.toString();
-			});
-
-			await new Promise((resolve) => {
-				testCommand.on('close', (code: number | null) => {
-					console.log(`Manual FFmpeg test exited with code: ${code}`);
-					if (code === 0) {
-						console.log('✅ Manual FFmpeg test succeeded');
-					} else {
-						console.log('❌ Manual FFmpeg test failed');
-						console.log('Test output:', testOutput);
-						console.log('Test error:', testError);
-					}
-					resolve(void 0);
-				});
-				setTimeout(() => {
-					testCommand.kill();
-					console.log('⏰ Manual FFmpeg test timed out');
-					resolve(void 0);
-				}, 5000);
-			});
-		} catch (manualTestError) {
-			console.warn('⚠️ Manual FFmpeg test error:', manualTestError);
-		}
-
-		console.log('FFmpeg working directory will be:', ffmpegCwd);
-
-		// Quick check if FFmpeg is available
-		try {
-			const { spawn } = require('child_process');
-			const testProcess = spawn('ffmpeg', ['-version'], { stdio: 'ignore' });
-			await new Promise((resolve, reject) => {
-				testProcess.on('close', (code: number | null) => {
-					if (code === 0) {
-						console.log('✅ FFmpeg is available and working');
-						resolve(void 0);
-					} else {
-						reject(new Error(`FFmpeg exited with code ${code}`));
-					}
-				});
-				testProcess.on('error', reject);
-				// Timeout after 5 seconds
-				setTimeout(() => reject(new Error('FFmpeg test timeout')), 5000);
-			});
-		} catch (ffmpegTestError) {
-			const errorMessage = ffmpegTestError instanceof Error ? ffmpegTestError.message : String(ffmpegTestError);
-			console.warn('⚠️  FFmpeg availability test failed:', errorMessage);
-			console.warn('This might cause the streaming to fail');
-		}
-
-		// Try to spawn FFmpeg with better error handling
-		try {
-			console.log(`🎬 Starting FFmpeg with device: "${obsCameraName}"`);
-			if (obsCameraName.includes('{')) {
-				console.log('🔧 Using device ID for maximum compatibility');
-			} else {
-				console.log('📝 Using friendly device name');
-			}
-			console.log(`🎛️  Device preference mode: ${this.preferDeviceId ? 'Device ID' : 'Friendly Name'}`);
-
-			this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-				cwd: ffmpegCwd,  // Use same working directory as OBS
-				stdio: ['ignore', 'pipe', 'pipe'],
-				env: { ...process.env }  // Pass through all environment variables
-			});
-
-			console.log('FFmpeg process spawned with PID:', this.ffmpegProcess.pid);
-
-			// Clear timeout if FFmpeg starts successfully
-			let startupTimeout: NodeJS.Timeout | null = setTimeout(() => {
-				console.warn('⚠️  FFmpeg startup timeout - device may not be ready');
-				console.warn('This could indicate the OBS Virtual Camera is not accessible');
-			}, 5000);
-
-			// Monitor FFmpeg startup and implement fallback strategy
-			let hasTriedFallback = false;
-
-			this.ffmpegProcess.on('close', (code: number | null) => {
-				if (startupTimeout) {
-					clearTimeout(startupTimeout);
-					startupTimeout = null;
-				}
-				console.log(`FFmpeg process exited with code ${code}`);
-				if (code !== 0 && code !== null) {
-					console.warn(`⚠️  FFmpeg exited unexpectedly with code ${code}`);
-					console.warn('This usually indicates a device access issue');
-
-					// If we used device ID and it failed, switch to friendly name for future attempts
-					if (!hasTriedFallback && obsCameraName.includes('{')) {
-						console.log('🔄 Device ID failed, switching to friendly name for future attempts');
-						this.preferDeviceId = false; // Switch to friendly name mode
-						hasTriedFallback = true;
-					}
-				}
-				this.ffmpegProcess = null;
-			});
-
-		} catch (spawnError) {
-			console.error('Failed to spawn FFmpeg process:', spawnError);
-			console.error('Possible causes:');
-			console.error('1. FFmpeg is not installed');
-			console.error('2. FFmpeg is not in system PATH');
-			console.error('3. Working directory issue:', ffmpegCwd);
-			throw spawnError;
-		}
+		console.log('FFmpeg process spawned with PID:', this.ffmpegProcess?.pid);
 
 		// Handle FFmpeg output
-		if (this.ffmpegProcess.stdout) {
-			this.ffmpegProcess.stdout.on('data', (data) => {
+		if (this.ffmpegProcess?.stdout) {
+			this.ffmpegProcess.stdout.on('data', (data: Buffer) => {
 				console.log('FFmpeg stdout:', data.toString());
 			});
 		}
 
-		if (this.ffmpegProcess.stderr) {
-			this.ffmpegProcess.stderr.on('data', (data) => {
-				console.log('FFmpeg stderr:', data.toString());
+		if (this.ffmpegProcess?.stderr) {
+			this.ffmpegProcess.stderr.on('data', (data: Buffer) => {
+				const output = data.toString();
+				console.log('FFmpeg stderr:', output);
+
+				// Check for specific error messages
+				if (output.includes('Could not find video device')) {
+					console.error('🚨 OBS Virtual Camera device not found!');
+					console.error('This usually means:');
+					console.error('1. OBS Virtual Camera is not started');
+					console.error('2. OBS is not running');
+					console.error('3. Device name is incorrect');
+					console.error('4. Device is being used by another application');
+				}
+				if (output.includes('Could not find audio device')) {
+					console.error('🚨 Dante Virtual Soundcard not found!');
+				}
 			});
 		}
 
+		this.ffmpegProcess?.on('close', (code: number | null) => {
+			console.log(`FFmpeg process exited with code ${code}`);
+			if (code !== 0 && code !== null) {
+				console.warn(`⚠️  FFmpeg exited unexpectedly with code ${code}`);
+				console.warn('This usually indicates a device access issue');
+			}
+			this.ffmpegProcess = null;
+		});
+
 		if (this.ffmpegProcess) {
-			this.ffmpegProcess.on('error', (error) => {
-				console.error('FFmpeg process error:', error);
-				this.ffmpegProcess = null;
+			this.ffmpegProcess.on('error', (error: Error) => {
+				console.error('Failed to spawn FFmpeg process:', error);
+				throw error;
 			});
 		}
 
