@@ -7,10 +7,10 @@ import { OBSManager } from "./obs-manager";
 
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? "ws://localhost:8080/agent";
 const AGENT_TOKEN = process.env.AGENT_TOKEN ?? "dev-shared-token";
-let AGENT_ID = process.env.AGENT_ID || `agent-${hostname()}-${Date.now()}-${randomUUID()}`;
+let AGENT_ID = process.env.AGENT_ID || `agent-${hostname()}`;
 // Ensure we never have a simple numeric ID that could conflict
 if (/^\d+$/.test(AGENT_ID)) {
-    AGENT_ID = `agent-${hostname()}-${Date.now()}-${randomUUID()}`;
+    AGENT_ID = `agent-${hostname()}`;
 }
 const AGENT_NAME = process.env.AGENT_NAME || hostname();
 const VERSION = "0.1.0";

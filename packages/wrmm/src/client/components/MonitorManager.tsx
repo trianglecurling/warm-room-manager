@@ -107,12 +107,45 @@ export const MonitorManager = () => {
   const { agents: orchestratorAgents, jobs: orchestratorJobs, isConnected: orchestratorConnected } = useOrchestrator();
 
   // Map orchestrator data to UI concepts
-  const agents = orchestratorAgents.map(agent => ({
-    id: agent.id,
-    name: agent.name,
-    status: agent.state,
-    assignedStreamKey: orchestratorJobs.find(job => job.id === agent.currentJobId)?.inlineConfig?.streamKey as StreamKey | undefined,
-  }));
+  // Deduplicate agents by name, preferring online agents over offline ones
+  const agents = useMemo(() => {
+    const agentMap = new Map<string, typeof orchestratorAgents[0]>();
+
+    // Group agents by name and select the best one for each name
+    orchestratorAgents.forEach(agent => {
+      const existing = agentMap.get(agent.name);
+      if (!existing) {
+        // First agent with this name
+        agentMap.set(agent.name, agent);
+      } else {
+        // Compare agents - prefer online (non-OFFLINE) over offline
+        const existingIsOnline = existing.state !== 'OFFLINE';
+        const currentIsOnline = agent.state !== 'OFFLINE';
+
+        if (currentIsOnline && !existingIsOnline) {
+          // Current is online, existing is offline - use current
+          agentMap.set(agent.name, agent);
+        } else if (!currentIsOnline && !existingIsOnline) {
+          // Both offline - use the more recently seen one
+          const existingTime = new Date(existing.lastSeenAt).getTime();
+          const currentTime = new Date(agent.lastSeenAt).getTime();
+          if (currentTime > existingTime) {
+            agentMap.set(agent.name, agent);
+          }
+        }
+        // If existing is online and current is also online, keep existing
+        // If existing is online and current is offline, keep existing
+      }
+    });
+
+    // Convert back to array and map to UI format
+    return Array.from(agentMap.values()).map(agent => ({
+      id: agent.id,
+      name: agent.name,
+      status: agent.state,
+      assignedStreamKey: orchestratorJobs.find(job => job.id === agent.currentJobId)?.inlineConfig?.streamKey as StreamKey | undefined,
+    }));
+  }, [orchestratorAgents, orchestratorJobs]);
 
   // Update streams based on orchestrator jobs
   const streamsWithJobs = useMemo(() => {
@@ -231,26 +264,6 @@ export const MonitorManager = () => {
     }
   };
 
-  const toggleMute = async (key: StreamKey, muted: boolean) => {
-    const stream = streamsWithJobs[key];
-    if (!stream.jobId) {
-      // No active job, just update local state
-      setStreams(prev => ({ ...prev, [key]: { ...prev[key], muted } }));
-      return;
-    }
-
-    try {
-      if (muted) {
-        await apiClient.muteJob(stream.jobId);
-        setSuccess(`Muted ${stream.name}`);
-      } else {
-        await apiClient.unmuteJob(stream.jobId);
-        setSuccess(`Unmuted ${stream.name}`);
-      }
-    } catch (error: any) {
-      setError(`Failed to ${muted ? 'mute' : 'unmute'} ${stream.name}: ${error.message}`);
-    }
-  };
 
   const updateTitle = async (key: StreamKey, title: string) => {
     const stream = streamsWithJobs[key];
@@ -304,20 +317,25 @@ export const MonitorManager = () => {
   };
   const toggleSelect = (key: StreamKey) => {
     if (key === 'vibe') return; // Vibe stream is auto-selected, not manually selectable
+    // Don't allow unselecting running streams - they should always remain selected
+    if (streamsWithJobs[key].isLive) return;
     setSelectedStreams(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
   };
   const selectAll = () => {
     const nonVibeStreams = streamOrder.filter(k => k !== 'vibe');
-    setSelectedStreams(nonVibeStreams);
+    const running = runningStreams();
+    const allToSelect = [...new Set([...nonVibeStreams, ...running])];
+    setSelectedStreams(allToSelect);
   };
   const clearSelection = () => {
-    setSelectedStreams([]);
+    // Only clear manually selected streams; running streams should always remain selected
+    const running = runningStreams();
+    setSelectedStreams(running);
   };
-  const selectedStates = () => selectedStreams.map(k => streamsWithJobs[k]);
-  const numLiveSelected = () => selectedStates().filter(s => s.isLive).length;
   const availableAgents = () => agents.filter(a => a.status === 'IDLE').length;
-  const numSelectedUnmuted = () => effectiveSelectedStreams().map(k => streamsWithJobs[k]).filter(s => !s.muted).length;
-  const numSelectedMuted = () => effectiveSelectedStreams().map(k => streamsWithJobs[k]).filter(s => s.muted).length;
+
+  // Helper function to get all currently running streams
+  const runningStreams = () => streamOrder.filter(key => streamsWithJobs[key].isLive);
   
   // Auto-select Vibe Stream logic
   const shouldAutoSelectVibe = () => {
@@ -325,31 +343,70 @@ export const MonitorManager = () => {
     const totalStreamsNeeded = nonVibeSelected.length + 1; // +1 for vibe stream
     return nonVibeSelected.length >= 2 && availableAgents() >= totalStreamsNeeded;
   };
+
   
-  // Update selectedStreams to include/exclude vibe based on conditions
+  // Update selectedStreams to always include running streams and handle vibe auto-selection
   const effectiveSelectedStreams = (): StreamKey[] => {
+    // Always include all running streams
+    const running = runningStreams();
+    const userSelected = selectedStreams;
+
+    // Combine running streams with user selections, removing duplicates
+    const combined = [...new Set([...running, ...userSelected])];
+
+    // Handle Vibe Stream auto-selection
     const shouldIncludeVibe = shouldAutoSelectVibe();
-    const hasVibe = selectedStreams.includes('vibe');
-    
+    const hasVibe = combined.includes('vibe');
+
     if (shouldIncludeVibe && !hasVibe) {
-      return [...selectedStreams, 'vibe'];
+      return [...combined, 'vibe'];
     } else if (!shouldIncludeVibe && hasVibe) {
-      return selectedStreams.filter(k => k !== 'vibe');
+      return combined.filter(k => k !== 'vibe');
     }
-    return selectedStreams;
+    return combined;
   };
   
-  const canStart = () => {
+  // Helper function to get selected streams that are not running
+  const selectedButNotRunning = () => {
     const effective = effectiveSelectedStreams();
-    return effective.length > 0 && numLiveSelected() === 0 && availableAgents() >= effective.length;
+    return effective.filter(key => !streamsWithJobs[key].isLive);
   };
-  const canStop = () => numLiveSelected() > 0;
+
+  // Helper function to get number of selected streams that are not running
+  const numSelectedNotRunning = () => selectedButNotRunning().length;
+
+  // Helper function to get number of running streams
+  const numRunningStreams = () => runningStreams().length;
+
+  // Counter that includes vibe for display purposes (independent of agent availability)
+  const displaySelectedCount = () => {
+    const running = runningStreams();
+    const userSelected = selectedStreams;
+    const combined = [...new Set([...running, ...userSelected])];
+
+    // Include vibe if 2+ non-vibe streams are selected (for display purposes only)
+    const nonVibeSelected = selectedStreams.filter(k => k !== 'vibe');
+    const shouldIncludeVibe = nonVibeSelected.length >= 2;
+    const hasVibe = combined.includes('vibe');
+
+    if (shouldIncludeVibe && !hasVibe) {
+      return combined.length + 1;
+    }
+    return combined.length;
+  };
+
+  const canStart = () => {
+    const notRunning = selectedButNotRunning();
+    return notRunning.length > 0 && availableAgents() >= notRunning.length;
+  };
+  const canStop = () => numRunningStreams() > 0;
   const bulkStart = async () => {
     if (!canStart()) return;
+    const streamsToStart = selectedButNotRunning();
     setBusy('Starting streams...');
     try {
-      await Promise.all(effectiveSelectedStreams().map((k: StreamKey) => toggleLive(k, true)));
-      setSuccess(`Started ${effectiveSelectedStreams().length} stream(s)`);
+      await Promise.all(streamsToStart.map((k: StreamKey) => toggleLive(k, true)));
+      setSuccess(`Started ${streamsToStart.length} stream(s)`);
     } catch (error: any) {
       setError(`Failed to start streams: ${error.message}`);
     }
@@ -357,16 +414,15 @@ export const MonitorManager = () => {
 
   const bulkStop = async () => {
     if (!canStop()) return;
+    const streamsToStop = runningStreams();
     setBusy('Stopping streams...');
     try {
-      await Promise.all(effectiveSelectedStreams().map((k: StreamKey) => toggleLive(k, false)));
-      setSuccess(`Stopped ${numLiveSelected()} stream(s)`);
+      await Promise.all(streamsToStop.map((k: StreamKey) => toggleLive(k, false)));
+      setSuccess(`Stopped ${streamsToStop.length} stream(s)`);
     } catch (error: any) {
       setError(`Failed to stop streams: ${error.message}`);
     }
   };
-  const bulkMute = () => { if (numSelectedUnmuted() === 0) return; effectiveSelectedStreams().filter((k: StreamKey) => !streamsWithJobs[k].muted).forEach((k: StreamKey) => toggleMute(k, true)); };
-  const bulkUnmute = () => { if (numSelectedMuted() === 0) return; effectiveSelectedStreams().filter((k: StreamKey) => streamsWithJobs[k].muted).forEach((k: StreamKey) => toggleMute(k, false)); };
   // no-op placeholder for future bulk metadata if needed
 
   const setBusy = (message: string) => setStatus({ kind: 'busy', message });
@@ -632,6 +688,17 @@ export const MonitorManager = () => {
     setMonitorHydrated(true);
   }, [selectedContext]);
 
+  // Auto-select running streams when they become available
+  useEffect(() => {
+    const running = runningStreams();
+    if (running.length > 0) {
+      setSelectedStreams(prev => {
+        const combined = [...new Set([...prev, ...running])];
+        return combined;
+      });
+    }
+  }, [streamsWithJobs]); // Re-run when streams state changes
+
   const makeFieldKey = (sheet: keyof MonitorData, team: 'red' | 'yellow') => `${sheet}-${team}`;
   const storageKeyFor = (context: string | undefined, sheet: keyof MonitorData, team: 'red' | 'yellow') => `wrmm.editMode.${context || 'noctx'}.${sheet}.${team}`;
 
@@ -872,6 +939,18 @@ export const MonitorManager = () => {
       const earliestTs = new Date(entries[0].game.date).getTime();
       // Tolerance: match exact same start time
       const atEarliest = entries.filter(e => new Date(e.game.date).getTime() === earliestTs);
+
+      // Update context to match the league of the upcoming draw
+      const earliestGame = entries[0].game;
+      if (earliestGame.league) {
+        const matchingContext = contexts.find(c => c.name === earliestGame.league);
+        if (matchingContext) {
+          setSelectedContext(earliestGame.league);
+          setSuccess(`Context updated to "${earliestGame.league}"`);
+        } else {
+          setError(`Warning: No context found for league "${earliestGame.league}". Please create a context for this league or select one manually.`);
+        }
+      }
       // Prepare whimsical placeholders
       const whimsies = ['Echoes', 'Ghosts', 'Tumbleweeds', 'Dust Bunnies', 'Falling Snowflakes', 'Emptiness', 'Phantoms'];
       let whimIdx = Math.floor(Math.random() * whimsies.length);
@@ -1986,6 +2065,59 @@ export const MonitorManager = () => {
               <p className="text-center text-gray-500 mt-1">Control multiple streams and monitor agent capacity</p>
             </div>
 
+            {/* Context Selection */}
+            <div className="bg-white rounded-lg shadow p-4 mb-6">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold text-gray-900">Stream Context</h2>
+                <div className="text-sm text-gray-600">Select context for stream titles</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Context:
+                </label>
+                <select
+                  value={selectedContext}
+                  onChange={(e) => setSelectedContext(e.target.value)}
+                  className="px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 min-w-[200px]"
+                  disabled={!Array.isArray(filteredContexts) || filteredContexts.length === 0}
+                >
+                  {Array.isArray(filteredContexts) && filteredContexts.length > 0 ? (
+                    <>
+                      {miscellaneousContexts.length > 0 && (
+                        <optgroup label="Miscellaneous">
+                          {miscellaneousContexts.map((context) => (
+                            <option key={`misc-${context.id}`} value={context.name}>
+                              {context.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {tournamentContexts.length > 0 && (
+                        <optgroup label="Tournaments">
+                          {tournamentContexts.map((context) => (
+                            <option key={`tournament-${context.id}`} value={context.name}>
+                              {context.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {leagueContexts.length > 0 && (
+                        <optgroup label="Leagues">
+                          {leagueContexts.map((context) => (
+                            <option key={`league-${context.id}`} value={context.name}>
+                              {context.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </>
+                  ) : (
+                    <option disabled>No contexts available</option>
+                  )}
+                </select>
+              </div>
+            </div>
+
             {/* Bulk Controls */}
             <div className="bg-white rounded-lg shadow p-4 mb-6">
               <div className="flex items-center justify-between mb-3">
@@ -1996,18 +2128,18 @@ export const MonitorManager = () => {
                 <div className="flex items-center gap-2 mr-4">
                   <button className="btn btn-secondary text-xs px-3 py-2" onClick={selectAll} title="Select all streams">Select All</button>
                   <button className="btn btn-secondary text-xs px-3 py-2" onClick={clearSelection} title="Clear selection">Clear</button>
-                  <span className="text-sm text-gray-600">{selectedStreams.length} selected</span>
+                  <span className="text-sm text-gray-600">{displaySelectedCount()} selected</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <button className="btn btn-primary text-sm px-4 py-2 disabled:opacity-50" onClick={bulkStart} disabled={!canStart() || !orchestratorConnected}>
-                    {orchestratorConnected ? `Start ${effectiveSelectedStreams().length} Stream${effectiveSelectedStreams().length === 1 ? '' : 's'}` : 'Orchestrator Offline'}
+                    {orchestratorConnected ? `Start ${numSelectedNotRunning()} Stream${numSelectedNotRunning() === 1 ? '' : 's'}` : 'Orchestrator Offline'}
                   </button>
                   <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" onClick={bulkStop} disabled={!canStop() || !orchestratorConnected}>
-                    {orchestratorConnected ? `Stop ${numLiveSelected()} Stream${numLiveSelected() === 1 ? '' : 's'}` : 'Orchestrator Offline'}
+                    {orchestratorConnected ? `Stop ${numRunningStreams()} Stream${numRunningStreams() === 1 ? '' : 's'}` : 'Orchestrator Offline'}
                   </button>
                   <span className="text-gray-300">|</span>
-                  <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" onClick={bulkMute} disabled={numSelectedUnmuted() === 0}>Mute {numSelectedUnmuted()} Stream{numSelectedUnmuted() === 1 ? '' : 's'}</button>
-                  <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" onClick={bulkUnmute} disabled={numSelectedMuted() === 0}>Unmute {numSelectedMuted()} Stream{numSelectedMuted() === 1 ? '' : 's'}</button>
+                  <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" disabled={true} title="Mute functionality not yet implemented">Mute (Disabled)</button>
+                  <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" disabled={true} title="Unmute functionality not yet implemented">Unmute (Disabled)</button>
                   <span className="text-gray-300">|</span>
                   <button
                     className="btn btn-secondary text-sm px-4 py-2"
@@ -2057,7 +2189,11 @@ export const MonitorManager = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
               {streamOrder.map(key => {
                 const s = streamsWithJobs[key];
-                const selected = effectiveSelectedStreams().includes(key);
+                const selected = key === 'vibe'
+                  ? selectedStreams.filter(k => k !== 'vibe').length >= 2 // Vibe is selected if 2+ other streams are selected
+                  : effectiveSelectedStreams().includes(key);
+                const isRunning = s.isLive;
+                const isDisabled = isRunning || (key === 'vibe' && selectedStreams.filter(k => k !== 'vibe').length >= 2); // Vibe is disabled when auto-selected
                 return (
                   <div key={key} className={`bg-white rounded-lg shadow p-4 ${selected ? 'ring-2 ring-blue-500' : ''}`}>
                     <div className="flex items-start justify-between">
@@ -2075,8 +2211,8 @@ export const MonitorManager = () => {
                           </div>
                         )}
                       </div>
-                      <label className="flex items-center gap-2 text-sm text-gray-700 select-none" title={key === 'vibe' ? 'Auto-selected when 2+ other streams selected and agent available' : 'Select for bulk controls'}>
-                        <input type="checkbox" className="h-4 w-4" checked={selected} onChange={() => toggleSelect(key)} disabled={key === 'vibe'} />
+                      <label className="flex items-center gap-2 text-sm text-gray-700 select-none" title={isRunning ? 'Running streams are always selected' : key === 'vibe' ? 'Auto-selected when 2+ other streams selected and agent available' : 'Select for bulk controls'}>
+                        <input type="checkbox" className="h-4 w-4" checked={selected} onChange={() => toggleSelect(key)} disabled={isDisabled} />
                         {key === 'vibe' ? 'Auto' : 'Select'}
                       </label>
                     </div>
@@ -2092,10 +2228,10 @@ export const MonitorManager = () => {
                         </button>
                         <button
                           className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"
-                          onClick={() => toggleMute(key, !s.muted)}
-                          disabled={!orchestratorConnected}
+                          disabled={true}
+                          title="Mute functionality not yet implemented"
                         >
-                          {orchestratorConnected ? (s.muted ? 'Unmute' : 'Mute') : 'Offline'}
+                          {s.muted ? 'Unmute' : 'Mute'} (Disabled)
                         </button>
                         <button
                           className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"

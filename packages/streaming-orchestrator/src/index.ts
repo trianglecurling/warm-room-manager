@@ -288,15 +288,15 @@ app.get("/oauth/callback", async (req, reply) => {
 
 	if (error) {
 		// Handle OAuth error
-		return reply.redirect(`http://localhost:5173/oauth?error=${encodeURIComponent(error)}`);
+		return reply.redirect(`http://localhost:3013/oauth?error=${encodeURIComponent(error)}`);
 	}
 
 	if (!code) {
-		return reply.redirect(`http://localhost:5173/oauth?error=no_code`);
+		return reply.redirect(`http://localhost:3013/oauth?error=no_code`);
 	}
 
 	// Redirect back to frontend with the authorization code
-	return reply.redirect(`http://localhost:5173/oauth?code=${encodeURIComponent(code)}`);
+	return reply.redirect(`http://localhost:3013/oauth?code=${encodeURIComponent(code)}`);
 });
 
 // Agents REST
@@ -770,6 +770,12 @@ wssAgents.on("connection", (ws) => {
 				};
 				const j = jobs.get(jobId);
 				if (!j) break;
+
+				// Update agent state based on job status
+				if (status === "RUNNING" && agent.currentJobId === jobId) {
+					setAgentState(agent, "RUNNING");
+				}
+
 				if (status === "RUNNING" && !j.startedAt) updateJob(jobId, { status, startedAt: new Date().toISOString() });
 				else updateJob(jobId, { status });
 				break;
@@ -912,9 +918,11 @@ async function schedule() {
 function generateStreamTitle(context: StreamContext): string {
 	const parts: string[] = [];
 
-	// Add context name
+	// Add context name (strip extra info like " - Fall 2025")
 	if (context.context) {
-		parts.push(context.context);
+		// Split on " - " and take only the first portion to remove season/year info
+		const cleanContext = context.context.split(' - ')[0].trim();
+		parts.push(cleanContext);
 	} else {
 		parts.push('Triangle Curling');
 	}
