@@ -25,8 +25,22 @@ let currentJobId: string | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let heartbeatIntervalMs = 3000;
 let obsManager: OBSManager | null = null;
+let isConnecting = false; // Prevent multiple simultaneous connection attempts
 
 function connect() {
+	// Prevent multiple simultaneous connection attempts
+	if (isConnecting) {
+		console.log(`Connection attempt already in progress, skipping...`);
+		return;
+	}
+	
+	// If already connected, don't reconnect
+	if (ws && ws.readyState === WebSocket.OPEN) {
+		console.log(`Already connected, skipping reconnect`);
+		return;
+	}
+	
+	isConnecting = true;
 	console.log(`Agent ${AGENT_NAME} connecting to ${ORCHESTRATOR_URL}...`);
 
 	// Initialize OBS Manager
@@ -35,6 +49,7 @@ function connect() {
 	ws = new WebSocket(ORCHESTRATOR_URL);
 
 	ws.on("open", () => {
+		isConnecting = false; // Connection established
 		state = "IDLE";
 		const hello: WSMessage = {
 			type: Msg.AgentHello,
@@ -95,10 +110,18 @@ function connect() {
 		}
 	});
 
-	ws.on("close", async () => {
-		console.log("Connection closed. Reconnecting in 3s...");
+	ws.on("close", async (code, reason) => {
+		const closedWs = ws; // Capture reference to the closed WebSocket
+		isConnecting = false; // Connection attempt finished (failed)
+		console.log(`Connection closed. Code: ${code}, Reason: ${reason?.toString() || 'No reason'}. Reconnecting in 3s...`);
 		stopHeartbeat();
 		state = "OFFLINE";
+		
+		// Clear WebSocket reference only if this is still the current WebSocket
+		// (prevents clearing a new connection that was established during cleanup)
+		if (ws === closedWs) {
+			ws = null;
+		}
 
 		// Clean up OBS processes
 		if (obsManager) {
@@ -109,10 +132,16 @@ function connect() {
 			}
 		}
 
-		setTimeout(connect, 3000);
+		// Only reconnect if we're not already connecting and this was the active connection
+		if (!isConnecting && ws === null) {
+			setTimeout(connect, 3000);
+		} else {
+			console.log(`Skipping reconnect - already connecting or new connection established`);
+		}
 	});
 
 	ws.on("error", (err) => {
+		isConnecting = false; // Connection attempt failed
 		console.error("WS error:", err);
 	});
 }

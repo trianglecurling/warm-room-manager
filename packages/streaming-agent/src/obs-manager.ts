@@ -109,6 +109,7 @@ export class OBSManager {
 		this.cleanup();
 	}
 
+
 	async startOBS(sceneName: string = 'SheetA'): Promise<void> {
 		// Update current scene before starting OBS
 		this.currentScene = sceneName;
@@ -117,12 +118,29 @@ export class OBSManager {
 
 		console.log('🏁 Starting OBS with path:', obsPath, 'and scene:', sceneName);
 		console.log('🎬 Setting currentScene to:', sceneName);
-		const { spawn } = require('child_process');
+		const { spawn, exec } = require('child_process');
+		const { promisify } = require('util');
+		const execAsync = promisify(exec);
+
+		// Check if OBS is already running
+		try {
+			const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq obs64.exe" /FO CSV /NH');
+			if (stdout && stdout.trim() && !stdout.includes('INFO: No tasks')) {
+				console.log('⚠️  OBS is already running. Will attempt to connect to existing instance.');
+				// Try to connect to existing OBS instance
+				await this.connectWithRetry(15, 1000);
+				return;
+			}
+		} catch (error) {
+			// Ignore errors checking for OBS - it might not be running
+			console.log('OBS is not currently running, will start it now');
+		}
 
 		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
 		console.log('OBS working directory:', obsDir);
 
-		const obsProcess = spawn(obsPath, [
+		// Build OBS command arguments
+		const obsArgs = [
 			'--websocket_port=4455',
 			'--websocket_password=randompassword123',
 			'--collection', 'auto4k',
@@ -132,8 +150,11 @@ export class OBSManager {
 			'--disable-shutdown-check',
 			'--disable-updater',
 			'--startvirtualcam'
-		], {
-			cwd: obsDir, // Set working directory to OBS installation directory
+		];
+
+		// Simple spawn approach - works when running interactively
+		const obsProcess = spawn(obsPath, obsArgs, {
+			cwd: obsDir,
 			detached: true,
 			stdio: 'ignore'
 		});

@@ -5,7 +5,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { youtubeService, YouTubeService } from "./youtube-service";
 import { randomUUID } from "crypto";
 import { google } from 'googleapis';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -116,6 +116,7 @@ function getClientIP(request: any): string {
  */
 type AgentNode = AgentInfo & {
 	ws?: WebSocket;
+	remoteAddress?: string; // IP address from WebSocket connection
 	timers: {
 		heartbeatTimeout?: NodeJS.Timeout;
 	};
@@ -1253,38 +1254,76 @@ app.post<{
 	if (!a) return reply.code(404).send({ error: "Agent not found" });
 
 	const reason = req.body.reason || 'Reboot requested from UI';
-	const sshConfig = a.meta?.ssh as { host?: string; user?: string; keyPath?: string; rebootCommand?: string } | undefined;
 	
-	if (!sshConfig || !sshConfig.host) {
+	// Get SSH configuration from environment variables
+	const sshUser = process.env.AGENT_SSH_USER || 'Administrator';
+	const sshKeyPath = process.env.AGENT_KEY_PATH;
+	const rebootCommand = process.env.AGENT_REBOOT_COMMAND || 'shutdown /r /f /t 0';
+	
+	// Get SSH host from agent's remote address (stored when WebSocket connects)
+	// Fallback to AGENT_SSH_HOST env var or agent name
+	const sshHost = a.remoteAddress || process.env.AGENT_SSH_HOST || a.name;
+	
+	if (!sshHost) {
 		return reply.code(400).send({ 
-			error: "SSH configuration not found",
-			message: "Please configure SSH settings in agent metadata. See documentation for setup instructions."
+			error: "SSH host not found",
+			message: "Cannot determine SSH host. Ensure agent is connected or set AGENT_SSH_HOST environment variable."
 		});
 	}
 
-	console.log(`🔄 Attempting SSH reboot for agent ${agentId} (${a.name}) at ${sshConfig.host}`);
+	console.log(`🔄 Attempting SSH reboot for agent ${agentId} (${a.name}) at ${sshHost}`);
 
 	try {
-		const sshUser = sshConfig.user || 'Administrator';
-		const sshHost = sshConfig.host;
-		
-		// Windows reboot command (default, can be overridden)
-		const rebootCommand = sshConfig.rebootCommand || 'shutdown /r /f /t 0';
+		// Normalize key path for Windows
+		let normalizedKeyPath: string | undefined = undefined;
+		if (sshKeyPath && sshKeyPath.trim()) {
+			const rawKeyPath = sshKeyPath.trim();
+			
+			// Verify key file exists
+			if (!existsSync(rawKeyPath)) {
+				console.warn(`⚠️  SSH key file not found: ${rawKeyPath}`);
+				console.warn(`   Will attempt SSH without key file (may prompt for password)`);
+				normalizedKeyPath = undefined;
+			} else {
+				console.log(`✅ SSH key file found: ${rawKeyPath}`);
+				// Convert Windows backslashes to forward slashes for SSH
+				// Windows OpenSSH supports both formats, but forward slashes are more reliable
+				normalizedKeyPath = rawKeyPath.replace(/\\/g, '/');
+			}
+		}
 		
 		// Build SSH command
 		let sshCommand: string;
-		if (sshConfig.keyPath) {
-			sshCommand = `ssh -i "${sshConfig.keyPath}" -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${rebootCommand}"`;
+		if (normalizedKeyPath) {
+			// Escape quotes in the path for shell safety
+			const escapedKeyPath = normalizedKeyPath.replace(/"/g, '\\"');
+			// Use additional SSH options to force key authentication and prevent password prompts
+			// If key auth fails, SSH will error instead of prompting for password
+			sshCommand = `ssh -i "${escapedKeyPath}" -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey ${sshUser}@${sshHost} "${rebootCommand}"`;
 		} else {
 			sshCommand = `ssh -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${rebootCommand}"`;
 		}
 
-		console.log(`Executing SSH command: ${sshCommand.replace(sshConfig.keyPath || '', '[KEY_PATH]')}`);
+		// Log command with key path masked for security
+		const logCommand = normalizedKeyPath 
+			? sshCommand.replace(normalizedKeyPath.replace(/\\/g, '/'), '[KEY_PATH]')
+			: sshCommand;
+		console.log(`Executing SSH command: ${logCommand}`);
+		if (normalizedKeyPath) {
+			console.log(`Using SSH key file: ${normalizedKeyPath}`);
+		} else {
+			console.log(`No SSH key specified, using default SSH keys`);
+		}
 
 		// Execute SSH command (don't wait for completion since machine will reboot)
 		execAsync(sshCommand).catch((error) => {
-			// It's normal for SSH to fail when the machine reboots
-			console.log(`SSH command executed (connection may have closed due to reboot):`, error.message);
+			// It's normal for SSH to fail when the machine reboots, but log other errors
+			if (error.message && !error.message.includes('Connection closed') && !error.message.includes('closed by remote host')) {
+				console.error(`SSH command error:`, error.message);
+				console.error(`Full error:`, error);
+			} else {
+				console.log(`SSH command executed (connection closed due to reboot)`);
+			}
 		});
 
 		return reply.code(202).send({ 
@@ -1700,6 +1739,8 @@ server.on("upgrade", (req, socket, head) => {
 		console.log(`Upgrading agent WebSocket connection`);
 		wssAgents.handleUpgrade(req, socket, head, (ws) => {
 			console.log(`Agent WebSocket connection established`);
+			// Store req in ws for later access
+			(ws as any)._req = req;
 			wssAgents.emit("connection", ws, req);
 		});
 	} else if (url?.startsWith("/ui")) {
@@ -1831,8 +1872,15 @@ type PendingAck = {
 };
 const pendingAssignAcks = new Map<string, PendingAck>(); // correlationId -> waiter
 
-wssAgents.on("connection", (ws) => {
+wssAgents.on("connection", (ws, req) => {
 	let attachedAgentId: string | null = null;
+	
+	// Get remote address from WebSocket connection or request
+	const reqObj = req || (ws as any)._req;
+	const remoteAddress = (ws as any)._socket?.remoteAddress || 
+		reqObj?.socket?.remoteAddress || 
+		(reqObj?.headers?.['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+		(reqObj?.headers?.['x-real-ip'] as string);
 
 	ws.on("error", (error) => {
 		console.error(`WebSocket error for agent ${attachedAgentId || 'unknown'}:`, error);
@@ -1874,7 +1922,7 @@ wssAgents.on("connection", (ws) => {
 			console.log(`Agent Hello received - ID: ${agentId}, Name: ${name}, Auth token: ${auth?.token ? 'provided' : 'missing'}`);
 			let agent = agents.get(agentId);
 			if (!agent) {
-				console.log(`New agent ${name} (${agentId}) connecting`);
+				console.log(`New agent ${name} (${agentId}) connecting from ${remoteAddress || 'unknown'}`);
 				agent = {
 					id: agentId,
 					name,
@@ -1887,22 +1935,31 @@ wssAgents.on("connection", (ws) => {
 					meta: {},
 					error: null,
 					ws,
+					remoteAddress,
 					timers: {},
 				};
 				agents.set(agentId, agent);
 			} else {
-				console.log(`Agent ${name} (${agentId}) reconnecting`);
+				console.log(`Agent ${name} (${agentId}) reconnecting from ${remoteAddress || 'unknown'}`);
 				// Always allow reconnection - clean up any existing WebSocket
-				if (agent.ws && agent.ws !== ws && agent.ws.readyState === WebSocket.OPEN) {
-					console.log(`Closing previous WebSocket for agent ${agentId}`);
-					try {
-						agent.ws.close();
-					} catch (e) {
-						// Ignore errors when closing old connection
+				if (agent.ws && agent.ws !== ws) {
+					const oldWs = agent.ws;
+					// Remove close handler from old WebSocket to prevent it from setting agent offline
+					oldWs.removeAllListeners('close');
+					oldWs.removeAllListeners('error');
+					oldWs.removeAllListeners('message');
+					if (oldWs.readyState === WebSocket.OPEN) {
+						console.log(`Closing previous WebSocket for agent ${agentId}`);
+						try {
+							oldWs.close();
+						} catch (e) {
+							// Ignore errors when closing old connection
+						}
 					}
 				}
 			}
 			agent.ws = ws;
+			agent.remoteAddress = remoteAddress; // Update remote address on reconnect
 			agent.name = name;
 			agent.version = version;
 			agent.capabilities = capabilities;
@@ -2099,8 +2156,16 @@ wssAgents.on("connection", (ws) => {
 		if (!attachedAgentId) return;
 		const agent = agents.get(attachedAgentId);
 		if (!agent) return;
-		console.log(`Agent ${agent.name} (${attachedAgentId}) disconnected - Code: ${code}, Reason: ${reason?.toString() || 'No reason'}`);
-		setAgentState(agent, "OFFLINE");
+		
+		// Only set offline if this is still the active WebSocket for the agent
+		// This prevents old WebSocket close events from affecting reconnected agents
+		if (agent.ws === ws) {
+			console.log(`Agent ${agent.name} (${attachedAgentId}) disconnected - Code: ${code}, Reason: ${reason?.toString() || 'No reason'}`);
+			setAgentState(agent, "OFFLINE");
+			agent.ws = undefined; // Clear WebSocket reference
+		} else {
+			console.log(`Ignoring close event from old WebSocket for agent ${attachedAgentId} (new connection active)`);
+		}
 	});
 });
 

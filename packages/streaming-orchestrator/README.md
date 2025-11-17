@@ -71,6 +71,10 @@ orchestrator.start();
 | `YOUTUBE_CLIENT_ID` | - | YouTube OAuth2 Client ID (optional) |
 | `YOUTUBE_CLIENT_SECRET` | - | YouTube OAuth2 Client Secret (optional) |
 | `YOUTUBE_REFRESH_TOKEN` | - | YouTube OAuth2 Refresh Token (optional) |
+| `AGENT_SSH_USER` | `Administrator` | SSH username for agent reboots (same for all agents) |
+| `AGENT_KEY_PATH` | - | Path to SSH private key file on orchestrator machine (optional) |
+| `AGENT_REBOOT_COMMAND` | `shutdown /r /f /t 0` | Windows reboot command (same for all agents) |
+| `AGENT_SSH_HOST` | - | Fallback SSH host if agent IP cannot be determined (optional) |
 
 ### CORS Configuration
 
@@ -642,6 +646,24 @@ Jobs now include `streamMetadata` field that gets updated in real-time with YouT
 - Monitor agent health via heartbeat
 - Use drain mode for graceful agent shutdown
 - Handle agent offline scenarios gracefully
+
+### Agent Reboot Configuration
+
+Agent reboots are performed via SSH. The SSH host is automatically detected from the agent's WebSocket connection IP address. Configure the following environment variables on the orchestrator:
+
+- **`AGENT_SSH_USER`** (default: `Administrator`): SSH username for all agents
+- **`AGENT_KEY_PATH`**: Path to SSH private key file on orchestrator machine (optional, uses default SSH keys if not set)
+- **`AGENT_REBOOT_COMMAND`** (default: `shutdown /r /f /t 0`): Windows reboot command for all agents
+- **`AGENT_SSH_HOST`**: Fallback SSH host if agent IP cannot be determined from WebSocket connection (optional)
+
+Example `.env` configuration:
+```bash
+AGENT_SSH_USER=tcc
+AGENT_KEY_PATH=C:\Users\orchestrator\.ssh\streaming_agent_key
+AGENT_REBOOT_COMMAND=shutdown /r /f /t 0
+```
+
+The orchestrator automatically detects the SSH host from each agent's WebSocket connection IP address, so you don't need to configure it per-agent.
 
 ### Error Handling
 - Implement retry logic for transient failures
