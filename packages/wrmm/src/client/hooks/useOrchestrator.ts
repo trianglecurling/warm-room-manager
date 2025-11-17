@@ -138,6 +138,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}): UseOrches
               lastSeenAt: message.payload.lastSeenAt,
               drain: message.payload.drain,
               capabilities: message.payload.capabilities,
+              meta: message.payload.meta,
             };
             return updated;
           } else {
@@ -150,6 +151,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}): UseOrches
               lastSeenAt: message.payload.lastSeenAt,
               drain: message.payload.drain,
               capabilities: message.payload.capabilities,
+              meta: message.payload.meta,
             }];
           }
         });

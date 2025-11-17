@@ -79,15 +79,6 @@ export const YouTubeOAuthPanel: React.FC = () => {
     }
   };
 
-  const disconnect = async () => {
-    setIsWorking(true);
-    try {
-      await apiClient.clearOAuthToken();
-    } finally {
-      setIsWorking(false);
-      await loadStatus();
-    }
-  };
 
   // Compact UI for status bar
   if (state.loading) {
@@ -134,16 +125,7 @@ export const YouTubeOAuthPanel: React.FC = () => {
         >
           {s.tokenStatus === 'expired' ? 'Reconnect' : 'Connect'}
         </button>
-      ) : (
-        <button
-          className="ml-2 px-2 py-0.5 rounded bg-gray-100 text-gray-800 hover:bg-gray-200 disabled:opacity-50"
-          onClick={disconnect}
-          disabled={isWorking}
-          title="Disconnect YouTube"
-        >
-          Disconnect
-        </button>
-      )}
+      ) : null /* Disconnect button moved to secret settings */}
       <button
         className="ml-1 underline text-gray-500 disabled:opacity-50"
         onClick={loadStatus}

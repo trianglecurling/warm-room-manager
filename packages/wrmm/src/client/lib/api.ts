@@ -134,7 +134,7 @@ export type RichMonitorsResponse = { A?: RichMonitorsSheet; B?: RichMonitorsShee
 
 // Orchestrator types
 export type AgentStatus = 'OFFLINE' | 'IDLE' | 'RESERVED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'ERROR' | 'DRAINING';
-export type JobStatus = 'CREATED' | 'PENDING' | 'ASSIGNED' | 'ACCEPTED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED' | 'FAILED' | 'CANCELED' | 'UNKNOWN';
+export type JobStatus = 'CREATED' | 'PENDING' | 'ASSIGNED' | 'ACCEPTED' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED' | 'FAILED' | 'CANCELED' | 'UNKNOWN' | 'DISMISSED';
 
 export interface StreamMetadata {
   title?: string;
@@ -158,6 +158,7 @@ export interface OrchestratorAgent {
     slots: number;
     maxResolution?: string;
   };
+  meta?: Record<string, unknown>;
 }
 
 export interface OrchestratorJob {
@@ -459,17 +460,40 @@ class ApiClient {
   }
 
   async createJob(jobRequest: CreateJobRequest): Promise<OrchestratorJob> {
+    console.log(`🌐 API createJob called`, {
+      idempotencyKey: jobRequest.idempotencyKey,
+      streamKey: jobRequest.inlineConfig?.streamKey,
+      timestamp: new Date().toISOString()
+    });
+
     const url = `${ORCHESTRATOR_BASE_URL}/v1/jobs`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(jobRequest),
     });
+
+    console.log(`🌐 API createJob response`, {
+      status: res.status,
+      statusText: res.statusText,
+      idempotencyKey: jobRequest.idempotencyKey
+    });
+
     if (!res.ok) {
       const errorText = await res.text().catch(() => '');
+      console.error(`🌐 API createJob failed`, {
+        status: res.status,
+        errorText,
+        idempotencyKey: jobRequest.idempotencyKey
+      });
       throw new Error(errorText || `Failed to create job: ${res.status} ${res.statusText}`);
     }
-    return res.json();
+    const result = await res.json();
+    console.log(`🌐 API createJob success`, {
+      jobId: result.id,
+      idempotencyKey: jobRequest.idempotencyKey
+    });
+    return result;
   }
 
   async stopJob(jobId: string): Promise<void> {
@@ -492,6 +516,35 @@ class ApiClient {
       const errorText = await res.text().catch(() => '');
       throw new Error(errorText || `Failed to set agent drain mode: ${res.status} ${res.statusText}`);
     }
+  }
+
+  async rebootAgent(agentId: string, reason?: string): Promise<{ ok: boolean; message: string; method?: string; host?: string }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/agents/${agentId}/reboot`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      const errorData = await res.json().catch(() => ({ error: errorText }));
+      throw new Error(errorData.error || errorData.message || `Failed to reboot agent: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async updateAgentMeta(agentId: string, meta: Record<string, unknown>): Promise<{ ok: boolean; agent: OrchestratorAgent }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/agents/${agentId}/meta`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meta }),
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to update agent metadata: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
   }
 
   // Stream metadata management
@@ -537,6 +590,16 @@ class ApiClient {
     return res.json();
   }
 
+  async dismissJob(jobId: string): Promise<{ ok: boolean; job: OrchestratorJob }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/jobs/${jobId}/dismiss`;
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to dismiss job: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
   // WebSocket connection for real-time updates
   createOrchestratorWebSocket(): WebSocket {
     const wsUrl = `ws://${ORCHESTRATOR_BASE_URL.replace('http://', '')}/ui`;
@@ -573,6 +636,47 @@ class ApiClient {
     const url = `${ORCHESTRATOR_BASE_URL}/oauth/token`;
     const res = await fetch(url, { method: 'DELETE' });
     if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to clear OAuth token'));
+    return res.json();
+  }
+
+  async updateStreamPrivacy(privacy: 'public' | 'unlisted'): Promise<{ success: boolean; privacy: string }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/config/stream-privacy`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ privacy })
+    });
+    if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to update stream privacy'));
+    return res.json();
+  }
+
+  async getAlternateColors(): Promise<{ alternateColors: boolean }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/config/alternate-colors`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to get alternate colors setting'));
+    return res.json();
+  }
+
+  async updateAlternateColors(alternateColors: boolean): Promise<{ success: boolean; alternateColors: boolean }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/config/alternate-colors`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alternateColors })
+    });
+    if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to update alternate colors'));
+    return res.json();
+  }
+
+  // Team names management
+  async updateTeamNames(sheet: string, red?: string, yellow?: string): Promise<{ success: boolean; teamNames: { red: string; yellow: string } }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/teamnames`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheet, red, yellow })
+    });
+    if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to update team names'));
     return res.json();
   }
 }

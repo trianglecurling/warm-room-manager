@@ -11,7 +11,8 @@ export type JobStatus =
 	| "STOPPED"
 	| "FAILED"
 	| "CANCELED"
-	| "UNKNOWN";
+	| "UNKNOWN"
+	| "DISMISSED";
 
 export interface AgentInfo {
 	id: string;
@@ -102,6 +103,7 @@ export const Msg = {
 	AgentError: "agent.error",
 	AgentJobMute: "agent.job.mute",
 	AgentJobUnmute: "agent.job.unmute",
+	AgentRebootAck: "agent.reboot.ack",
 
 	OrchestratorHelloOk: "orchestrator.hello.ok",
 	OrchestratorAssignStart: "orchestrator.assign.start",
@@ -109,6 +111,7 @@ export const Msg = {
 	OrchestratorJobKill: "orchestrator.job.kill",
 	OrchestratorJobMute: "orchestrator.job.mute",
 	OrchestratorJobUnmute: "orchestrator.job.unmute",
+	OrchestratorReboot: "orchestrator.reboot",
 
 	UIAgentUpdate: "ui.agent.update",
 	UIJobUpdate: "ui.job.update",

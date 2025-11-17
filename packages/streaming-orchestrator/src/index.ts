@@ -4,9 +4,14 @@ import cors from "@fastify/cors";
 import { WebSocketServer, WebSocket } from "ws";
 import { youtubeService, YouTubeService } from "./youtube-service";
 import { randomUUID } from "crypto";
-import { readFileSync, writeFileSync } from "fs";
 import { google } from 'googleapis';
+import { readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { AgentInfo, AgentState, Job, JobStatus, WSMessage, Msg, StreamMetadata, StreamContext } from "@warm-room-manager/shared";
+
+const execAsync = promisify(exec);
 
 /**
  * Configuration
@@ -18,6 +23,94 @@ const HEARTBEAT_TIMEOUT_MS = Number(process.env.HEARTBEAT_TIMEOUT_MS ?? 10000);
 const STOP_GRACE_MS = Number(process.env.STOP_GRACE_MS ?? 10000);
 const KILL_AFTER_MS = Number(process.env.KILL_AFTER_MS ?? 5000);
 
+// Security: Enable IP-based access control to restrict public access
+// Set to true in production to only allow /status and /status-ws from external IPs
+const ENABLE_PUBLIC_ACCESS_RESTRICTIONS = process.env.ENABLE_PUBLIC_ACCESS_RESTRICTIONS === 'true';
+
+// In-memory stream privacy setting (not persisted)
+let currentStreamPrivacy: 'public' | 'unlisted' = (process.env.YOUTUBE_STREAM_PRIVACY === 'public' ? 'public' : 'unlisted');
+
+// In-memory alternate colors setting (not persisted)
+let useAlternateColors = false;
+
+/**
+ * Security: IP-based access control helpers
+ */
+
+// List of public endpoints that can be accessed from external IPs
+const PUBLIC_ENDPOINTS = new Set([
+	'/',
+	'/status',
+	'/healthz',
+]);
+
+// List of public WebSocket paths
+const PUBLIC_WS_PATHS = new Set([
+	'/status-ws',
+]);
+
+/**
+ * Check if an IP address is from a trusted/internal source
+ * Returns true for localhost and private IP ranges
+ */
+function isTrustedIP(ip: string): boolean {
+	// Handle IPv6 localhost
+	if (ip === '::1' || ip === '::ffff:127.0.0.1') {
+		return true;
+	}
+
+	// Handle IPv4 localhost
+	if (ip === '127.0.0.1' || ip.startsWith('127.')) {
+		return true;
+	}
+
+	// Handle private IPv4 ranges
+	// 10.0.0.0/8
+	if (ip.startsWith('10.')) {
+		return true;
+	}
+
+	// 172.16.0.0/12
+	const parts = ip.split('.');
+	if (parts[0] === '172') {
+		const second = parseInt(parts[1], 10);
+		if (second >= 16 && second <= 31) {
+			return true;
+		}
+	}
+
+	// 192.168.0.0/16
+	if (ip.startsWith('192.168.')) {
+		return true;
+	}
+
+	// Not a trusted IP
+	return false;
+}
+
+/**
+ * Get the real client IP from the request
+ * Handles X-Forwarded-For header set by reverse proxy
+ */
+function getClientIP(request: any): string {
+	// Check X-Forwarded-For header (set by reverse proxy)
+	const forwardedFor = request.headers['x-forwarded-for'];
+	if (forwardedFor) {
+		// X-Forwarded-For can be a comma-separated list, take the first one
+		const ips = forwardedFor.split(',').map((ip: string) => ip.trim());
+		return ips[0];
+	}
+
+	// Check X-Real-IP header (alternative header used by some proxies)
+	const realIP = request.headers['x-real-ip'];
+	if (realIP) {
+		return realIP;
+	}
+
+	// Fallback to socket remote address
+	return request.socket?.remoteAddress || request.ip || 'unknown';
+}
+
 /**
  * In-memory stores (replace with SQLite later)
  */
@@ -28,9 +121,94 @@ type AgentNode = AgentInfo & {
 	};
 };
 
+// Debounced YouTube metadata updates
+type PendingYouTubeUpdate = {
+	timer: NodeJS.Timeout;
+	broadcastId: string;
+	updates: { title?: string; description?: string };
+};
+const pendingYouTubeUpdates = new Map<string, PendingYouTubeUpdate>(); // jobId -> pending update
+
+// Team names storage for browser sources
+type TeamNamesStore = {
+	[sheet: string]: {
+		red: string;
+		yellow: string;
+	};
+};
+
 const agents = new Map<string, AgentNode>();
 const jobs = new Map<string, Job>();
 const pendingByIdem = new Map<string, string>(); // idemKey -> jobId
+const teamNames: TeamNamesStore = {
+	A: { red: '', yellow: '' },
+	B: { red: '', yellow: '' },
+	C: { red: '', yellow: '' },
+	D: { red: '', yellow: '' },
+	vibe: { red: '', yellow: '' },
+};
+
+// Rate limiter for YouTube broadcast creation: max 10 per 10 minutes
+const broadcastTimestamps: number[] = []; // Array of timestamps (ms since epoch)
+
+// Global job creation rate limiter: allow bursts of up to 5 jobs, then 2 seconds between requests
+const recentJobCreations: number[] = []; // Timestamps of recent job creations
+const BURST_ALLOWANCE = 5; // Allow up to 5 jobs without rate limiting
+const MIN_TIME_BETWEEN_JOBS = 2000; // 2 seconds minimum between jobs after burst
+
+/**
+ * Check if creating a YouTube broadcast would exceed the rate limit
+ * @returns true if allowed, false if rate limit exceeded
+ */
+function checkBroadcastRateLimit(): boolean {
+	const now = Date.now();
+	const tenMinutesAgo = now - (10 * 60 * 1000);
+
+	// Remove timestamps older than 10 minutes
+	while (broadcastTimestamps.length > 0 && broadcastTimestamps[0] < tenMinutesAgo) {
+		broadcastTimestamps.shift();
+	}
+
+	// Check if we would exceed the limit
+	return broadcastTimestamps.length < 10;
+}
+
+/**
+ * Record a successful broadcast creation for rate limiting
+ */
+function recordBroadcastCreation(): void {
+	broadcastTimestamps.push(Date.now());
+}
+
+/**
+ * Check if job creation is allowed based on global rate limiting
+ * @returns true if allowed, false if rate limit exceeded
+ */
+function checkJobCreationRateLimit(): boolean {
+	const now = Date.now();
+
+	// Clean up old timestamps (older than the minimum time window)
+	const cutoffTime = now - MIN_TIME_BETWEEN_JOBS;
+	while (recentJobCreations.length > 0 && recentJobCreations[0] < cutoffTime) {
+		recentJobCreations.shift();
+	}
+
+	// Allow burst: if we have fewer than BURST_ALLOWANCE recent jobs, allow immediately
+	if (recentJobCreations.length < BURST_ALLOWANCE) {
+		return true;
+	}
+
+	// After burst allowance, check timing: must be at least MIN_TIME_BETWEEN_JOBS since oldest job
+	const timeSinceOldest = now - recentJobCreations[0];
+	return timeSinceOldest >= MIN_TIME_BETWEEN_JOBS;
+}
+
+/**
+ * Record a job creation attempt for global rate limiting
+ */
+function recordJobCreation(): void {
+	recentJobCreations.push(Date.now());
+}
 
 /**
  * UI WS hub
@@ -49,6 +227,105 @@ function broadcastUI<T = unknown>(type: string, payload: T) {
 			ws.send(data);
 		} catch (_) {
 			/* noop */
+		}
+	}
+}
+
+/**
+ * Status WS hub for public status updates
+ */
+const statusClients = new Set<WebSocket>();
+
+function getStatusData() {
+	const activeStatuses: JobStatus[] = ["PENDING", "ASSIGNED", "ACCEPTED", "STARTING", "RUNNING", "STOPPING"];
+	const activeJobs = Array.from(jobs.values()).filter(job => activeStatuses.includes(job.status));
+
+	const streams = activeJobs.map(job => {
+		const metadata = job.streamMetadata;
+		const context = metadata?.streamContext;
+		const youtube = metadata?.youtube;
+
+		let thumbnail: string | undefined;
+		if (youtube?.videoId) {
+			thumbnail = `https://i.ytimg.com/vi/${youtube.videoId}/maxresdefault.jpg`;
+		}
+
+		return {
+			sheet: context?.sheet || null,
+			title: metadata?.title || null,
+			description: metadata?.description || null,
+			publicLink: metadata?.publicUrl || null,
+			adminLink: metadata?.adminUrl || null,
+			thumbnail: thumbnail || null,
+			startTime: job.startedAt || job.createdAt,
+			team1: (context?.sheet === 'vibe' ? null : context?.team1) || null,
+			team2: (context?.sheet === 'vibe' ? null : context?.team2) || null,
+		};
+	});
+
+	return { streams };
+}
+
+function broadcastStatus() {
+	const statusData = getStatusData();
+	const msg = JSON.stringify({
+		type: 'status.update',
+		ts: new Date().toISOString(),
+		payload: statusData,
+	});
+
+	for (const ws of statusClients) {
+		try {
+			if (ws.readyState === WebSocket.OPEN) {
+				ws.send(msg);
+			}
+		} catch (_) {
+			/* noop */
+		}
+	}
+}
+
+/**
+ * Browser source WS hub for team name updates
+ */
+const browserSourceClients = new Map<string, Set<WebSocket>>(); // key: "sheet:color"
+function broadcastTeamNameUpdate(sheet: string, color: 'red' | 'yellow', teamName: string) {
+	const key = `${sheet}:${color}`;
+	const clients = browserSourceClients.get(key);
+	if (!clients) return;
+
+	const msg = JSON.stringify({
+		type: 'teamname.update',
+		sheet,
+		color,
+		teamName,
+		ts: new Date().toISOString(),
+	});
+
+	for (const ws of clients) {
+		try {
+			ws.send(msg);
+		} catch (_) {
+			/* noop */
+		}
+	}
+}
+
+function broadcastColorModeUpdate(useAlternateColors: boolean) {
+	const msg = JSON.stringify({
+		type: 'colormode.update',
+		useAlternateColors,
+		ts: new Date().toISOString(),
+	});
+
+	// Broadcast to all browser source clients
+	for (const clientSet of browserSourceClients.values()) {
+		for (const ws of clientSet) {
+			try {
+				ws.send(msg);
+			} catch (_) {
+				/* noop */
+			}
 		}
 	}
 }
@@ -75,6 +352,7 @@ function createJob(partial: Partial<Job> & { inlineConfig?: Record<string, unkno
 	};
 	jobs.set(id, job);
 	broadcastUI(Msg.UIJobUpdate, job);
+	broadcastStatus(); // Broadcast status update to public clients
 	return job;
 }
 
@@ -84,6 +362,7 @@ function updateJob(id: string, patch: Partial<Job>) {
 	Object.assign(j, patch, { updatedAt: new Date().toISOString() });
 	jobs.set(id, j);
 	broadcastUI(Msg.UIJobUpdate, j);
+	broadcastStatus(); // Broadcast status update to public clients
 }
 
 function toPublicAgent(a: AgentNode): AgentInfo {
@@ -121,9 +400,608 @@ async function setupApp() {
 		methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 		allowedHeaders: ['Content-Type', 'Authorization']
 	});
+
+	// Add IP-based access control hook
+	if (ENABLE_PUBLIC_ACCESS_RESTRICTIONS) {
+		app.addHook('onRequest', async (request, reply) => {
+			const clientIP = getClientIP(request);
+			const path = request.url;
+			const isTrusted = isTrustedIP(clientIP);
+
+			// Log access attempts for monitoring
+			if (!isTrusted && !PUBLIC_ENDPOINTS.has(path)) {
+				console.warn(`⚠️  Blocked external access attempt from ${clientIP} to ${path}`);
+			}
+
+			// If the request is from a trusted IP, allow all endpoints
+			if (isTrusted) {
+				return;
+			}
+
+			// If the request is from an external IP, only allow public endpoints
+			if (!PUBLIC_ENDPOINTS.has(path)) {
+				console.warn(`❌ Rejected external access from ${clientIP} to non-public endpoint: ${path}`);
+				return reply.code(403).send({
+					error: 'Forbidden',
+					message: 'This endpoint is not publicly accessible'
+				});
+			}
+
+			// Log allowed public access
+			console.log(`✅ Allowed public access from ${clientIP} to ${path}`);
+		});
+
+		console.log('🔒 Public access restrictions ENABLED');
+		console.log(`   Public HTTP endpoints: ${Array.from(PUBLIC_ENDPOINTS).join(', ')}`);
+		console.log(`   Public WS paths: ${Array.from(PUBLIC_WS_PATHS).join(', ')}`);
+	} else {
+		console.log('⚠️  Public access restrictions DISABLED (all endpoints accessible)');
+	}
 }
 
 app.get("/healthz", async () => ({ ok: true }));
+
+// Root endpoint - serves a live stream status monitor page
+app.get("/", async (request, reply) => {
+	const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Live Stream Status - Triangle Curling</title>
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+		body {
+			font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+			padding: 20px;
+			background: #f5f5f5;
+		}
+		.container {
+			max-width: 1200px;
+			margin: 0 auto;
+			background: white;
+			padding: 20px;
+			border-radius: 8px;
+			box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+		}
+		h1 {
+			color: #333;
+			margin-bottom: 10px;
+		}
+		.status {
+			display: inline-block;
+			padding: 4px 12px;
+			border-radius: 4px;
+			font-size: 14px;
+			font-weight: 600;
+			margin-bottom: 20px;
+		}
+		.status.connected {
+			background: #4caf50;
+			color: white;
+		}
+		.status.disconnected {
+			background: #f44336;
+			color: white;
+		}
+		.status.connecting {
+			background: #ff9800;
+			color: white;
+		}
+		.streams {
+			display: grid;
+			grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+			gap: 20px;
+			margin-top: 20px;
+		}
+		.stream-card {
+			border: 1px solid #e0e0e0;
+			border-radius: 8px;
+			overflow: hidden;
+			transition: transform 0.2s, box-shadow 0.2s;
+		}
+		.stream-card:hover {
+			transform: translateY(-4px);
+			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+		}
+		.stream-card img {
+			width: 100%;
+			height: 180px;
+			object-fit: cover;
+			background: #000;
+		}
+		.stream-card .content {
+			padding: 15px;
+		}
+		.stream-card h3 {
+			color: #333;
+			margin-bottom: 8px;
+			font-size: 16px;
+		}
+		.stream-card .sheet {
+			display: inline-block;
+			background: #2196f3;
+			color: white;
+			padding: 2px 8px;
+			border-radius: 4px;
+			font-size: 12px;
+			font-weight: 600;
+			margin-bottom: 8px;
+		}
+		.stream-card .teams {
+			color: #666;
+			font-size: 14px;
+			margin-bottom: 8px;
+		}
+		.stream-card .time {
+			color: #999;
+			font-size: 12px;
+			margin-bottom: 12px;
+		}
+		.stream-card .links {
+			display: flex;
+			gap: 10px;
+		}
+		.stream-card a {
+			flex: 1;
+			padding: 8px;
+			text-align: center;
+			border-radius: 4px;
+			text-decoration: none;
+			font-size: 14px;
+			font-weight: 600;
+			transition: opacity 0.2s;
+		}
+		.stream-card a:hover {
+			opacity: 0.8;
+		}
+		.stream-card a.public {
+			background: #4caf50;
+			color: white;
+		}
+		.no-streams {
+			text-align: center;
+			padding: 40px;
+			color: #999;
+			font-size: 18px;
+		}
+	</style>
+</head>
+<body>
+	<div class="container">
+		<h1>Triangle Curling Live Stream Status</h1>
+		<div class="status connecting" id="status">Connecting...</div>
+
+		<div class="streams" id="streams">
+			<div class="no-streams">Connecting to stream status server...</div>
+		</div>
+	</div>
+
+	<script>
+		let ws;
+		let reconnectTimeout;
+		const WS_URL = 'wss://stream.tccnc.club/status-ws';
+
+		function connect() {
+			const statusEl = document.getElementById('status');
+			
+			statusEl.textContent = 'Connecting...';
+			statusEl.className = 'status connecting';
+
+			ws = new WebSocket(WS_URL);
+
+			ws.onopen = () => {
+				console.log('WebSocket connected');
+				statusEl.textContent = 'Connected';
+				statusEl.className = 'status connected';
+				clearTimeout(reconnectTimeout);
+			};
+
+			ws.onmessage = (event) => {
+				try {
+					const data = JSON.parse(event.data);
+					console.log('Received status update:', data);
+					
+					if (data.type === 'status.update') {
+						updateStreams(data.payload.streams);
+					}
+				} catch (error) {
+					console.error('Error parsing message:', error);
+				}
+			};
+
+			ws.onclose = () => {
+				console.log('WebSocket disconnected');
+				statusEl.textContent = 'Disconnected';
+				statusEl.className = 'status disconnected';
+				
+				// Auto-reconnect after 2 seconds
+				clearTimeout(reconnectTimeout);
+				reconnectTimeout = setTimeout(connect, 2000);
+			};
+
+			ws.onerror = (error) => {
+				console.error('WebSocket error:', error);
+				ws.close();
+			};
+		}
+
+		function updateStreams(streams) {
+			const streamsEl = document.getElementById('streams');
+			
+			if (!streams || streams.length === 0) {
+				streamsEl.innerHTML = '<div class="no-streams">No active streams</div>';
+				return;
+			}
+
+			streamsEl.innerHTML = streams.map(stream => {
+				const sheetLabel = stream.sheet === 'vibe' ? 'VIBE' : \`SHEET \${stream.sheet}\`;
+				const teams = stream.team1 && stream.team2 
+					? \`\${stream.team1} vs \${stream.team2}\`
+					: '';
+				
+				const startTime = new Date(stream.startTime);
+				const timeStr = startTime.toLocaleString();
+
+				return \`
+					<div class="stream-card">
+						\${stream.thumbnail ? \`<img src="\${stream.thumbnail}" alt="Stream thumbnail" onerror="this.style.display='none'">\` : ''}
+						<div class="content">
+							<div class="sheet">\${sheetLabel}</div>
+							<h3>\${stream.title || 'Untitled Stream'}</h3>
+							\${teams ? \`<div class="teams">\${teams}</div>\` : ''}
+							<div class="time">Started: \${timeStr}</div>
+							<div class="links">
+								\${stream.publicLink ? \`<a href="\${stream.publicLink}" target="_blank" class="public">Watch Live</a>\` : ''}
+							</div>
+						</div>
+					</div>
+				\`;
+			}).join('');
+		}
+
+		// Connect on page load
+		connect();
+	</script>
+</body>
+</html>`;
+	
+	reply.type('text/html');
+	return html;
+});
+
+// Status endpoint - returns information about all active streams
+// This endpoint has open CORS to allow access from any client/origin
+app.get("/status", {
+	preHandler: async (request, reply) => {
+		// Set CORS headers to allow any origin
+		reply.header('Access-Control-Allow-Origin', '*');
+		reply.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+		reply.header('Access-Control-Allow-Headers', 'Content-Type');
+	}
+}, async () => {
+	return getStatusData();
+});
+
+// Team names management endpoints
+app.get("/v1/teamnames", async () => {
+	return teamNames;
+});
+
+app.put<{
+	Body: {
+		sheet: string;
+		red?: string;
+		yellow?: string;
+	};
+}>("/v1/teamnames", async (req, reply) => {
+	const { sheet, red, yellow } = req.body;
+	
+	if (!sheet || !teamNames[sheet]) {
+		return reply.code(400).send({ error: 'Invalid sheet identifier' });
+	}
+
+	if (red !== undefined) {
+		teamNames[sheet].red = red;
+		broadcastTeamNameUpdate(sheet, 'red', red);
+	}
+
+	if (yellow !== undefined) {
+		teamNames[sheet].yellow = yellow;
+		broadcastTeamNameUpdate(sheet, 'yellow', yellow);
+	}
+
+	return { success: true, teamNames: teamNames[sheet] };
+});
+
+// Browser source endpoint for OBS
+app.get<{
+	Params: {
+		sheet: string;
+		color: string;
+	};
+}>("/teamnames/:sheet/:color", async (req, reply) => {
+	const { sheet, color } = req.params;
+	
+	if (!teamNames[sheet] || (color !== 'red' && color !== 'yellow')) {
+		return reply.code(404).send({ error: 'Invalid sheet or color' });
+	}
+
+	// Vibe stream shows all 4 sheets
+	const isVibeStream = sheet === 'vibe';
+	
+	// Determine color based on alternate colors setting
+	const getColor = (colorParam: string): string => {
+		if (useAlternateColors) {
+			return colorParam === 'red' ? '#3B82F6' : '#10B981'; // Blue and Green
+		}
+		return colorParam === 'red' ? '#DC2626' : '#EAB308'; // Red and Yellow
+	};
+	
+	let html: string;
+	
+	if (isVibeStream) {
+		// Show all 4 team names for vibe stream
+		const teamA = teamNames['A'][color as 'red' | 'yellow'];
+		const teamB = teamNames['B'][color as 'red' | 'yellow'];
+		const teamC = teamNames['C'][color as 'red' | 'yellow'];
+		const teamD = teamNames['D'][color as 'red' | 'yellow'];
+		const teamColor = getColor(color);
+
+		html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Team Names - Vibe ${color}</title>
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+		body {
+			font-family: 'Arial', sans-serif;
+			background: transparent;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			min-height: 100vh;
+			overflow: hidden;
+			width: 100vw;
+		}
+		#team-names-container {
+			display: flex;
+			width: 100%;
+			height: 100%;
+			align-items: center;
+			justify-content: space-around;
+		}
+		.team-name {
+			font-size: 48px;
+			font-weight: bold;
+			text-align: center;
+			text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+			padding: 20px;
+			width: 25%;
+			transition: opacity 0.3s ease;
+			color: ${teamColor};
+		}
+		.hidden {
+			opacity: 0;
+		}
+	</style>
+</head>
+<body>
+	<div id="team-names-container">
+		<div class="team-name" data-sheet="A">${teamA || ''}</div>
+		<div class="team-name" data-sheet="B">${teamB || ''}</div>
+		<div class="team-name" data-sheet="C">${teamC || ''}</div>
+		<div class="team-name" data-sheet="D">${teamD || ''}</div>
+	</div>
+	<script>
+		const color = '${color}';
+		const sheets = ['A', 'B', 'C', 'D'];
+		
+		// Helper to get color based on mode
+		function getColor(colorParam, useAlternateColors) {
+			if (useAlternateColors) {
+				return colorParam === 'red' ? '#3B82F6' : '#10B981'; // Blue and Green
+			}
+			return colorParam === 'red' ? '#DC2626' : '#EAB308'; // Red and Yellow
+		}
+		
+		// Update all team name colors
+		function updateColors(useAlternateColors) {
+			const newColor = getColor(color, useAlternateColors);
+			document.querySelectorAll('.team-name').forEach(el => {
+				el.style.color = newColor;
+			});
+		}
+		
+		// Connect to WebSocket for live updates
+		const wsUrl = \`ws://\${window.location.host}/teamnames-ws\`;
+		let ws;
+		let reconnectTimeout;
+
+		function connect() {
+			ws = new WebSocket(wsUrl);
+			
+			ws.onopen = () => {
+				console.log('WebSocket connected');
+				// Register for all 4 sheets
+				sheets.forEach(sheet => {
+					ws.send(JSON.stringify({
+						type: 'register',
+						sheet: sheet,
+						color: color
+					}));
+				});
+			};
+			
+			ws.onmessage = (event) => {
+				try {
+					const data = JSON.parse(event.data);
+					
+					if (data.type === 'colormode.update') {
+						// Update colors immediately
+						updateColors(data.useAlternateColors);
+					} else if (data.type === 'teamname.update' && sheets.includes(data.sheet) && data.color === color) {
+						const teamNameEl = document.querySelector(\`.team-name[data-sheet="\${data.sheet}"]\`);
+						if (teamNameEl) {
+							// Fade out, update, fade in
+							teamNameEl.classList.add('hidden');
+							setTimeout(() => {
+								teamNameEl.textContent = data.teamName || '';
+								teamNameEl.classList.remove('hidden');
+							}, 300);
+						}
+					}
+				} catch (err) {
+					console.error('Failed to parse message:', err);
+				}
+			};
+			
+			ws.onclose = () => {
+				console.log('WebSocket disconnected, reconnecting in 2s...');
+				clearTimeout(reconnectTimeout);
+				reconnectTimeout = setTimeout(connect, 2000);
+			};
+			
+			ws.onerror = (err) => {
+				console.error('WebSocket error:', err);
+				ws.close();
+			};
+		}
+		
+		connect();
+	</script>
+</body>
+</html>`;
+	} else {
+		// Single sheet display
+		const teamName = teamNames[sheet][color as 'red' | 'yellow'];
+		const teamColor = getColor(color);
+
+		html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Team Name - ${sheet.toUpperCase()} ${color}</title>
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+		body {
+			font-family: 'Arial', sans-serif;
+			background: transparent;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			min-height: 100vh;
+			overflow: hidden;
+		}
+		#team-name {
+			font-size: 48px;
+			font-weight: bold;
+			text-align: center;
+			text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+			padding: 20px;
+			transition: opacity 0.3s ease;
+			color: ${teamColor};
+		}
+		.hidden {
+			opacity: 0;
+		}
+	</style>
+</head>
+<body>
+	<div id="team-name">${teamName || ''}</div>
+	<script>
+		const sheet = '${sheet}';
+		const color = '${color}';
+		const teamNameEl = document.getElementById('team-name');
+		
+		// Helper to get color based on mode
+		function getColor(colorParam, useAlternateColors) {
+			if (useAlternateColors) {
+				return colorParam === 'red' ? '#3B82F6' : '#10B981'; // Blue and Green
+			}
+			return colorParam === 'red' ? '#DC2626' : '#EAB308'; // Red and Yellow
+		}
+		
+		// Update color
+		function updateColor(useAlternateColors) {
+			const newColor = getColor(color, useAlternateColors);
+			teamNameEl.style.color = newColor;
+		}
+		
+		// Connect to WebSocket for live updates
+		const wsUrl = \`ws://\${window.location.host}/teamnames-ws\`;
+		let ws;
+		let reconnectTimeout;
+
+		function connect() {
+			ws = new WebSocket(wsUrl);
+			
+			ws.onopen = () => {
+				console.log('WebSocket connected');
+				// Send registration message
+				ws.send(JSON.stringify({
+					type: 'register',
+					sheet: sheet,
+					color: color
+				}));
+			};
+			
+			ws.onmessage = (event) => {
+				try {
+					const data = JSON.parse(event.data);
+					
+					if (data.type === 'colormode.update') {
+						// Update color immediately
+						updateColor(data.useAlternateColors);
+					} else if (data.type === 'teamname.update' && data.sheet === sheet && data.color === color) {
+						// Fade out, update, fade in
+						teamNameEl.classList.add('hidden');
+						setTimeout(() => {
+							teamNameEl.textContent = data.teamName || '';
+							teamNameEl.classList.remove('hidden');
+						}, 300);
+					}
+				} catch (err) {
+					console.error('Failed to parse message:', err);
+				}
+			};
+			
+			ws.onclose = () => {
+				console.log('WebSocket disconnected, reconnecting in 2s...');
+				clearTimeout(reconnectTimeout);
+				reconnectTimeout = setTimeout(connect, 2000);
+			};
+			
+			ws.onerror = (err) => {
+				console.error('WebSocket error:', err);
+				ws.close();
+			};
+		}
+		
+		connect();
+	</script>
+</body>
+</html>`;
+	}
+
+	reply.type('text/html');
+	return html;
+});
 
 // OAuth management endpoints
 app.get("/oauth/status", async () => {
@@ -216,43 +1094,62 @@ app.post("/oauth/token", async (req) => {
 		const { tokens } = await oauth2Client.getToken(code);
 		oauth2Client.setCredentials(tokens);
 
-		// Update environment variable (in a real app, you'd save to database)
+		// Update environment variable in-memory
 		if (tokens.refresh_token) {
 			process.env.YOUTUBE_REFRESH_TOKEN = tokens.refresh_token;
-		}
 
-		// Save to .env file
-		try {
-			let envContent = '';
+			// Persist to .env file
 			try {
-				envContent = readFileSync('.env', 'utf8');
-			} catch (e) {
-				// .env doesn't exist, create new one
-			}
-
-			const lines = envContent.split('\n');
-			let found = false;
-			const updatedLines = lines.map(line => {
-				if (line.startsWith('YOUTUBE_REFRESH_TOKEN=')) {
-					found = true;
-					return `YOUTUBE_REFRESH_TOKEN=${tokens.refresh_token}`;
+				const envPath = join(process.cwd(), '.env');
+				let envContent = '';
+				try {
+					envContent = readFileSync(envPath, 'utf8');
+				} catch (e) {
+					// .env doesn't exist, create new one
 				}
-				return line;
-			});
 
-			if (!found) {
-				updatedLines.push(`YOUTUBE_REFRESH_TOKEN=${tokens.refresh_token}`);
+				// Check if refresh token already exists
+				const refreshTokenExists = envContent.includes('YOUTUBE_REFRESH_TOKEN=');
+
+				if (refreshTokenExists) {
+					// Replace existing refresh token
+					const lines = envContent.split('\n');
+					const updatedLines = lines.map(line => {
+						if (line.startsWith('YOUTUBE_REFRESH_TOKEN=')) {
+							return `YOUTUBE_REFRESH_TOKEN=${tokens.refresh_token}`;
+						}
+						return line;
+					});
+					writeFileSync(envPath, updatedLines.join('\n'));
+					console.log('✅ Updated YOUTUBE_REFRESH_TOKEN in .env file');
+				} else {
+					// Add new refresh token
+					const newEnvVars = [
+						`# YouTube OAuth2 Refresh Token`,
+						`YOUTUBE_REFRESH_TOKEN=${tokens.refresh_token}`,
+						''
+					].join('\n');
+
+					const updatedEnv = envContent
+						? envContent + '\n' + newEnvVars
+						: newEnvVars;
+
+					writeFileSync(envPath, updatedEnv);
+					console.log('✅ Added YOUTUBE_REFRESH_TOKEN to .env file');
+				}
+			} catch (error) {
+				console.warn('⚠️  Could not save refresh token to .env file:', error);
+				console.warn('Token updated in memory only - restart required for persistence');
 			}
 
-			writeFileSync('.env', updatedLines.join('\n'));
-		} catch (error) {
-			console.warn('Could not save refresh token to .env file:', error);
+			// Update the YouTubeService singleton with the new token
+			youtubeService.updateRefreshToken(tokens.refresh_token);
 		}
 
 		return {
 			success: true,
 			message: 'OAuth2 token updated successfully',
-			refreshToken: tokens.refresh_token ? 'saved' : 'not_provided'
+			refreshToken: tokens.refresh_token ? 'updated' : 'not_provided'
 		};
 	} catch (error) {
 		throw new Error(`Failed to exchange authorization code: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -263,24 +1160,41 @@ app.delete("/oauth/token", async () => {
 	// Clear the refresh token
 	delete process.env.YOUTUBE_REFRESH_TOKEN;
 
-	// Remove from .env file
-	try {
-		let envContent = '';
-		try {
-			envContent = readFileSync('.env', 'utf8');
-		} catch (e) {
-			return { success: true, message: 'OAuth2 token cleared (no .env file found)' };
-		}
+	return { success: true, message: 'OAuth2 token cleared successfully' };
+});
 
-		const lines = envContent.split('\n');
-		const updatedLines = lines.filter(line => !line.startsWith('YOUTUBE_REFRESH_TOKEN='));
+// Stream configuration endpoints
+app.get("/v1/config/stream-privacy", async () => {
+	return { privacy: currentStreamPrivacy };
+});
 
-		writeFileSync('.env', updatedLines.join('\n'));
-	} catch (error) {
-		console.warn('Could not remove refresh token from .env file:', error);
+app.put<{ Body: { privacy: 'public' | 'unlisted' } }>("/v1/config/stream-privacy", async (req, reply) => {
+	const { privacy } = req.body;
+	if (privacy !== 'public' && privacy !== 'unlisted') {
+		return reply.code(400).send({ error: 'Invalid privacy setting. Must be "public" or "unlisted"' });
 	}
 
-	return { success: true, message: 'OAuth2 token cleared successfully' };
+	currentStreamPrivacy = privacy;
+
+	return { success: true, privacy };
+});
+
+app.get("/v1/config/alternate-colors", async () => {
+	return { alternateColors: useAlternateColors };
+});
+
+app.put<{ Body: { alternateColors: boolean } }>("/v1/config/alternate-colors", async (req, reply) => {
+	const { alternateColors } = req.body;
+	if (typeof alternateColors !== 'boolean') {
+		return reply.code(400).send({ error: 'Invalid alternateColors setting. Must be a boolean' });
+	}
+
+	useAlternateColors = alternateColors;
+	
+	// Broadcast to all browser sources so they update immediately
+	broadcastColorModeUpdate(alternateColors);
+
+	return { success: true, alternateColors };
 });
 
 app.get("/oauth/callback", async (req, reply) => {
@@ -315,6 +1229,79 @@ app.post<{
 	return { ok: true, agent: toPublicAgent(a) };
 });
 
+app.put<{
+	Params: { id: string };
+	Body: { meta?: Record<string, unknown> };
+}>("/v1/agents/:id/meta", async (req, reply) => {
+	const a = agents.get(req.params.id);
+	if (!a) return reply.code(404).send({ error: "Agent not found" });
+	
+	if (req.body.meta !== undefined) {
+		a.meta = { ...a.meta, ...req.body.meta };
+		broadcastUI(Msg.UIAgentUpdate, toPublicAgent(a));
+	}
+	
+	return { ok: true, agent: toPublicAgent(a) };
+});
+
+app.post<{
+	Params: { id: string };
+	Body: { reason?: string };
+}>("/v1/agents/:id/reboot", async (req, reply) => {
+	const agentId = req.params.id;
+	const a = agents.get(agentId);
+	if (!a) return reply.code(404).send({ error: "Agent not found" });
+
+	const reason = req.body.reason || 'Reboot requested from UI';
+	const sshConfig = a.meta?.ssh as { host?: string; user?: string; keyPath?: string; rebootCommand?: string } | undefined;
+	
+	if (!sshConfig || !sshConfig.host) {
+		return reply.code(400).send({ 
+			error: "SSH configuration not found",
+			message: "Please configure SSH settings in agent metadata. See documentation for setup instructions."
+		});
+	}
+
+	console.log(`🔄 Attempting SSH reboot for agent ${agentId} (${a.name}) at ${sshConfig.host}`);
+
+	try {
+		const sshUser = sshConfig.user || 'Administrator';
+		const sshHost = sshConfig.host;
+		
+		// Windows reboot command (default, can be overridden)
+		const rebootCommand = sshConfig.rebootCommand || 'shutdown /r /f /t 0';
+		
+		// Build SSH command
+		let sshCommand: string;
+		if (sshConfig.keyPath) {
+			sshCommand = `ssh -i "${sshConfig.keyPath}" -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${rebootCommand}"`;
+		} else {
+			sshCommand = `ssh -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${rebootCommand}"`;
+		}
+
+		console.log(`Executing SSH command: ${sshCommand.replace(sshConfig.keyPath || '', '[KEY_PATH]')}`);
+
+		// Execute SSH command (don't wait for completion since machine will reboot)
+		execAsync(sshCommand).catch((error) => {
+			// It's normal for SSH to fail when the machine reboots
+			console.log(`SSH command executed (connection may have closed due to reboot):`, error.message);
+		});
+
+		return reply.code(202).send({ 
+			ok: true, 
+			message: 'Reboot command sent via SSH',
+			method: 'ssh',
+			host: sshHost
+		});
+	} catch (error) {
+		console.error(`Failed to reboot agent via SSH:`, error);
+		return reply.code(500).send({ 
+			error: "Failed to execute SSH reboot",
+			message: error instanceof Error ? error.message : 'Unknown error'
+		});
+	}
+});
+
 // Jobs REST
 app.get("/v1/jobs", async (req) => {
 	return Array.from(jobs.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -341,7 +1328,35 @@ app.post<{
 		};
 	};
 }>("/v1/jobs", async (req, reply) => {
+	console.log('📨 Server received job creation request', {
+		idempotencyKey: req.body.idempotencyKey,
+		streamKey: req.body.inlineConfig?.streamKey,
+		timestamp: new Date().toISOString(),
+		requestId: Math.random().toString(36).substr(2, 9)
+	});
+
 	const { templateId, inlineConfig, idempotencyKey, restartPolicy, streamContext } = req.body;
+
+	// Global rate limit check: prevent rapid-fire job creation requests
+	const now = Date.now();
+	console.log('🔒 Server job creation rate limit check', {
+		now,
+		recentJobsCount: recentJobCreations.length,
+		burstAllowance: BURST_ALLOWANCE,
+		isWithinBurst: recentJobCreations.length < BURST_ALLOWANCE
+	});
+
+	if (!checkJobCreationRateLimit()) {
+		console.error('❌ Job creation rate limit exceeded: minimum 2 seconds between requests');
+		return reply.code(429).send({
+			error: "Job creation rate limit exceeded. Please wait at least 2 seconds between job creation requests.",
+			code: "JOB_CREATION_RATE_LIMIT"
+		});
+	}
+
+	// Record this job creation attempt for rate limiting
+	recordJobCreation();
+	console.log('✅ Server job creation rate limit passed, total recent jobs:', recentJobCreations.length);
 
 	if (!!templateId === !!inlineConfig) {
 		return reply.code(422).send({
@@ -375,17 +1390,57 @@ app.post<{
 		let title: string;
 		let description: string;
 
-		if (streamContext) {
-			// Generate title based on stream context
+		// Check if custom title/description were provided in inlineConfig
+		const customTitle = inlineConfig?.title as string | undefined;
+		const customDescription = inlineConfig?.description as string | undefined;
+		const hasCustomTitle = customTitle && customTitle.trim() !== '';
+		const hasCustomDescription = customDescription && customDescription.trim() !== '';
+
+		// Use custom title if provided, otherwise auto-generate
+		if (hasCustomTitle) {
+			title = customTitle.trim();
+			console.log(`Using custom title: "${title}"`);
+		} else if (streamContext) {
 			title = generateStreamTitle(streamContext);
-			description = generateStreamDescription(streamContext);
+			console.log(`Auto-generated title: "${title}"`);
 		} else {
-			// Fallback to default titles
 			title = YouTubeService.generateStreamTitle();
-			description = YouTubeService.generateStreamDescription();
+			console.log(`Using default title: "${title}"`);
 		}
 
-		const youtubeMetadata = await youtubeService.createLiveBroadcast(title, description);
+		// Use custom description if provided, otherwise auto-generate
+		if (hasCustomDescription) {
+			description = customDescription.trim();
+			console.log(`Using custom description: "${description}"`);
+		} else if (streamContext) {
+			description = generateStreamDescription(streamContext);
+			console.log(`Auto-generated description: "${description}"`);
+		} else {
+			description = YouTubeService.generateStreamDescription();
+			console.log(`Using default description: "${description}"`);
+		}
+
+		// Check rate limit for YouTube broadcast creation
+		if (!checkBroadcastRateLimit()) {
+			console.error('YouTube broadcast creation rate limit exceeded: max 10 per 10 minutes');
+
+			// Fail the job creation due to rate limit
+			updateJob(job.id, {
+				status: "FAILED",
+				error: {
+					code: "RATE_LIMIT_EXCEEDED",
+					message: "YouTube broadcast creation rate limit exceeded. Maximum 10 broadcasts per 10 minutes allowed."
+				}
+			});
+
+			console.log(`Job ${job.id} failed due to rate limit`);
+			return reply.code(201).send(jobs.get(job.id));
+		}
+
+		const youtubeMetadata = await youtubeService.createLiveBroadcast(title, description, currentStreamPrivacy);
+
+		// Record successful broadcast creation for rate limiting
+		recordBroadcastCreation();
 
 		console.log(`YouTube metadata created:`, {
 			videoId: youtubeMetadata.videoId,
@@ -400,8 +1455,8 @@ app.post<{
 			title,
 			description,
 			platform: 'youtube',
-			publicUrl: `https://youtube.com/watch?v=${youtubeMetadata.videoId}`,
-			adminUrl: `https://studio.youtube.com/video/${youtubeMetadata.videoId}/livestreaming`,
+			publicUrl: `https://youtube.com/live/${youtubeMetadata.videoId}`,
+			adminUrl: `https://studio.youtube.com/video/${youtubeMetadata.videoId}`,
 			youtube: youtubeMetadata,
 			streamContext, // Store the context for future reference
 		};
@@ -458,6 +1513,15 @@ app.post<{ Params: { id: string } }>("/v1/jobs/:id/stop", async (req, reply) => 
 	return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
 });
 
+app.post<{ Params: { id: string } }>("/v1/jobs/:id/dismiss", async (req, reply) => {
+	const job = jobs.get(req.params.id);
+	if (!job) return reply.code(404).send({ error: "Not Found" });
+
+	updateJob(job.id, { status: "DISMISSED", endedAt: new Date().toISOString() });
+	console.log(`Job ${job.id} dismissed by user`);
+	return reply.code(200).send({ ok: true, job: jobs.get(job.id) });
+});
+
 // Stream metadata management
 app.get<{ Params: { id: string } }>("/v1/jobs/:id/metadata", async (req, reply) => {
 	const job = jobs.get(req.params.id);
@@ -474,8 +1538,63 @@ app.put<{
 
 	const updatedMetadata = { ...job.streamMetadata, ...req.body };
 	updateJob(job.id, { streamMetadata: updatedMetadata });
+
+	// If title or description is being updated and we have a YouTube broadcast, schedule a debounced update
+	const isRunning = job.status === "RUNNING" || job.status === "STARTING";
+	const broadcastId = job.streamMetadata?.youtube?.broadcastId;
+	const hasUpdates = req.body.title !== undefined || req.body.description !== undefined;
+
+	if (isRunning && broadcastId && hasUpdates) {
+		const youtubeUpdates: { title?: string; description?: string } = {};
+		if (req.body.title !== undefined) youtubeUpdates.title = req.body.title;
+		if (req.body.description !== undefined) youtubeUpdates.description = req.body.description;
+
+		scheduleYouTubeMetadataUpdate(job.id, broadcastId, youtubeUpdates);
+	}
+
 	return reply.code(200).send({ ok: true, metadata: updatedMetadata });
 });
+
+/**
+ * Schedule a debounced YouTube metadata update
+ * Waits 10 seconds after the last update before actually calling YouTube API
+ */
+function scheduleYouTubeMetadataUpdate(jobId: string, broadcastId: string, updates: { title?: string; description?: string }) {
+	// Cancel any existing pending update for this job
+	const existing = pendingYouTubeUpdates.get(jobId);
+	if (existing) {
+		clearTimeout(existing.timer);
+	}
+
+	// Merge new updates with any existing pending updates
+	const mergedUpdates = existing 
+		? { ...existing.updates, ...updates }
+		: updates;
+
+	// Schedule new update after 10 seconds
+	const timer = setTimeout(async () => {
+		console.log(`Executing debounced YouTube metadata update for broadcast ${broadcastId}:`, mergedUpdates);
+		
+		try {
+			await youtubeService.updateBroadcast(broadcastId, mergedUpdates);
+			console.log(`✅ Successfully updated YouTube broadcast ${broadcastId}`);
+		} catch (error) {
+			console.error(`❌ Failed to update YouTube broadcast ${broadcastId}:`, error);
+		} finally {
+			// Remove from pending updates
+			pendingYouTubeUpdates.delete(jobId);
+		}
+	}, 10000); // 10 second debounce
+
+	// Store the pending update
+	pendingYouTubeUpdates.set(jobId, {
+		timer,
+		broadcastId,
+		updates: mergedUpdates,
+	});
+
+	console.log(`Scheduled YouTube metadata update for broadcast ${broadcastId} (will execute in 10s)`);
+}
 
 // Mute control endpoints
 app.post<{ Params: { id: string } }>("/v1/jobs/:id/mute", async (req, reply) => {
@@ -533,10 +1652,50 @@ const server = app.server as unknown as import("http").Server;
 
 const wssAgents = new WebSocketServer({ noServer: true });
 const wssUi = new WebSocketServer({ noServer: true });
+const wssBrowserSource = new WebSocketServer({ noServer: true });
+const wssStatus = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
 	const { url } = req;
 	console.log(`WebSocket upgrade request: ${url}`);
+	
+	// Apply IP-based access control for WebSocket connections
+	if (ENABLE_PUBLIC_ACCESS_RESTRICTIONS) {
+		// Get client IP (handle X-Forwarded-For from reverse proxy)
+		const forwardedFor = req.headers['x-forwarded-for'];
+		const realIP = req.headers['x-real-ip'];
+		let clientIP: string = 'unknown';
+		
+		if (forwardedFor) {
+			clientIP = (typeof forwardedFor === 'string' ? forwardedFor.split(',')[0].trim() : forwardedFor[0]);
+		} else if (realIP && typeof realIP === 'string') {
+			clientIP = realIP;
+		} else if (req.socket?.remoteAddress) {
+			clientIP = req.socket.remoteAddress;
+		}
+		
+		const isTrusted = isTrustedIP(clientIP);
+		
+		// Check if this is a public WebSocket path
+		const isPublicPath = Array.from(PUBLIC_WS_PATHS).some(path => url?.startsWith(path));
+		
+		// If not from trusted IP and not a public path, reject
+		if (!isTrusted && !isPublicPath) {
+			console.warn(`❌ Rejected external WebSocket connection from ${clientIP} to ${url}`);
+			socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+			socket.destroy();
+			return;
+		}
+		
+		if (!isTrusted && isPublicPath) {
+			console.log(`✅ Allowed public WebSocket connection from ${clientIP} to ${url}`);
+		}
+	}
+	
+	// Accept any origin for WebSocket connections (required for CORS)
+	// This is safe for public endpoints like status and teamnames
+	const origin = req.headers.origin;
+	
 	if (url?.startsWith("/agent")) {
 		console.log(`Upgrading agent WebSocket connection`);
 		wssAgents.handleUpgrade(req, socket, head, (ws) => {
@@ -548,6 +1707,18 @@ server.on("upgrade", (req, socket, head) => {
 		wssUi.handleUpgrade(req, socket, head, (ws) => {
 			console.log(`UI WebSocket connection established`);
 			wssUi.emit("connection", ws, req);
+		});
+	} else if (url?.startsWith("/status-ws")) {
+		console.log(`Upgrading status WebSocket connection from origin: ${origin || 'unknown'}`);
+		wssStatus.handleUpgrade(req, socket, head, (ws) => {
+			console.log(`Status WebSocket connection established`);
+			wssStatus.emit("connection", ws, req);
+		});
+	} else if (url?.startsWith("/teamnames-ws")) {
+		console.log(`Upgrading browser source WebSocket connection`);
+		wssBrowserSource.handleUpgrade(req, socket, head, (ws) => {
+			console.log(`Browser source WebSocket connection established`);
+			wssBrowserSource.emit("connection", ws, req);
 		});
 	} else {
 		console.log(`Rejecting WebSocket upgrade for unknown path: ${url}`);
@@ -575,6 +1746,80 @@ wssUi.on("connection", (ws) => {
 			payload: Array.from(jobs.values()),
 		})
 	);
+});
+
+wssStatus.on("connection", (ws) => {
+	statusClients.add(ws);
+	console.log(`Status client connected. Total clients: ${statusClients.size}`);
+	
+	// Send initial status snapshot
+	try {
+		const statusData = getStatusData();
+		ws.send(JSON.stringify({
+			type: 'status.update',
+			ts: new Date().toISOString(),
+			payload: statusData,
+		}));
+	} catch (error) {
+		console.error('Error sending initial status to client:', error);
+	}
+	
+	ws.on("close", () => {
+		statusClients.delete(ws);
+		console.log(`Status client disconnected. Total clients: ${statusClients.size}`);
+	});
+	
+	ws.on("error", (error) => {
+		console.error('Status WebSocket error:', error);
+	});
+});
+
+wssBrowserSource.on("connection", (ws) => {
+	let registeredKey: string | null = null;
+
+	ws.on("message", (raw) => {
+		try {
+			const msg = JSON.parse(String(raw));
+			if (msg.type === 'register') {
+				const { sheet, color } = msg;
+				if (teamNames[sheet] && (color === 'red' || color === 'yellow')) {
+					registeredKey = `${sheet}:${color}`;
+					
+					// Add to the appropriate client set
+					if (!browserSourceClients.has(registeredKey)) {
+						browserSourceClients.set(registeredKey, new Set());
+					}
+					browserSourceClients.get(registeredKey)!.add(ws);
+					
+					console.log(`Browser source registered: ${registeredKey}`);
+					
+					// Send initial team name
+					ws.send(JSON.stringify({
+						type: 'teamname.update',
+						sheet,
+						color,
+						teamName: teamNames[sheet][color as 'red' | 'yellow'],
+						ts: new Date().toISOString(),
+					}));
+				}
+			}
+		} catch (err) {
+			console.error('Failed to parse browser source message:', err);
+		}
+	});
+
+	ws.on("close", () => {
+		if (registeredKey) {
+			const clients = browserSourceClients.get(registeredKey);
+			if (clients) {
+				clients.delete(ws);
+				if (clients.size === 0) {
+					browserSourceClients.delete(registeredKey);
+				}
+			}
+			console.log(`Browser source disconnected: ${registeredKey}`);
+		}
+	});
 });
 
 /**
@@ -788,11 +2033,27 @@ wssAgents.on("connection", (ws) => {
 				};
 				const j = jobs.get(jobId);
 				if (j) {
+					// Clear title and description when stream stops so they can be auto-generated next time
+					const clearedMetadata = j.streamMetadata ? {
+						...j.streamMetadata,
+						title: '',
+						description: '',
+					} : undefined;
+
 					updateJob(jobId, {
 						status,
 						endedAt: new Date().toISOString(),
 						error: error ?? null,
+						streamMetadata: clearedMetadata,
 					});
+
+					// Cancel any pending YouTube updates for this job
+					const pending = pendingYouTubeUpdates.get(jobId);
+					if (pending) {
+						clearTimeout(pending.timer);
+						pendingYouTubeUpdates.delete(jobId);
+						console.log(`Cancelled pending YouTube update for stopped job ${jobId}`);
+					}
 				}
 				if (agent.currentJobId === jobId) {
 					agent.currentJobId = null;
@@ -927,29 +2188,40 @@ function generateStreamTitle(context: StreamContext): string {
 		parts.push('Triangle Curling');
 	}
 
-	// Add sheet identifier
-	if (context.sheet) {
-		if (context.sheet === 'vibe') {
-			parts.push('Vibe Stream');
-		} else {
-			parts.push(`Sheet ${context.sheet}`);
-		}
-	} else {
-		parts.push('Live Stream');
-	}
-
-	// Add date and time in format: m/d/yyyy h:mm am/pm
+	// Get date (used in both formats)
 	const now = new Date();
 	const month = now.getMonth() + 1;
 	const day = now.getDate();
 	const year = now.getFullYear();
-	const timeString = now.toLocaleString('en-US', {
-		hour: 'numeric',
-		minute: '2-digit',
-		hour12: true
-	});
 
-	parts.push(`${month}/${day}/${year} ${timeString}`);
+	// Check if team names are populated (and not vibe stream)
+	const hasTeamNames = context.sheet !== 'vibe' && context.team1 && context.team2;
+
+	if (hasTeamNames) {
+		// Format with team names: <Context> - <Sheet letter>: <Red team name> v. <Yellow team name> - <mm/dd/yyyy>
+		parts.push(`${context.sheet}: ${context.team1} v. ${context.team2}`);
+		parts.push(`${month}/${day}/${year}`);
+	} else {
+		// Format without team names: <Context> - Sheet <Sheet letter> - <mm/dd/yyyy> <h:mm AM/PM>
+		// Add sheet identifier
+		if (context.sheet) {
+			if (context.sheet === 'vibe') {
+				parts.push('Vibe Stream');
+			} else {
+				parts.push(`Sheet ${context.sheet}`);
+			}
+		} else {
+			parts.push('Live Stream');
+		}
+
+		// Add date and time
+		const timeString = now.toLocaleString('en-US', {
+			hour: 'numeric',
+			minute: '2-digit',
+			hour12: true
+		});
+		parts.push(`${month}/${day}/${year} ${timeString}`);
+	}
 
 	return parts.join(' - ');
 }
@@ -971,8 +2243,10 @@ async function startServer() {
 
 	app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
 		console.log(`Orchestrator listening on http://localhost:${PORT}`);
-		console.log(`- Agent WS: ws://localhost:${PORT}/agent`);
-		console.log(`- UI WS:    ws://localhost:${PORT}/ui`);
+		console.log(`- Agent WS:  ws://localhost:${PORT}/agent`);
+		console.log(`- UI WS:     ws://localhost:${PORT}/ui`);
+		console.log(`- Status WS: ws://localhost:${PORT}/status-ws (public)`);
+		console.log(`- Status HTTP: http://localhost:${PORT}/status (public)`);
 	});
 }
 

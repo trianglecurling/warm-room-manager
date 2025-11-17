@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { ArrowsUpDownIcon, ArrowsRightLeftIcon, PlusCircleIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { ExclamationTriangleIcon as ExclamationSolidIcon, CheckCircleIcon as CheckSolidIcon, PencilSquareIcon } from '@heroicons/react/24/solid';
 import logo from '../assets/logo.png';
@@ -13,6 +13,8 @@ import { TimerManager } from './TimerManager';
 import { useQueryClient } from '@tanstack/react-query';
 import { useOrchestrator } from '../hooks/useOrchestrator';
 import { YouTubeOAuthPanel } from './YouTubeOAuthPanel';
+import { SecretConfigModal } from './SecretConfigModal';
+import { StreamStartCountdownModal } from './StreamStartCountdownModal';
 
 
 interface SheetData {
@@ -60,11 +62,20 @@ export const MonitorManager = () => {
   });
   const [isContextModalOpen, setIsContextModalOpen] = useState<null | { mode: 'new' | 'edit' }>(null);
   const [isPresetNameModalOpen, setIsPresetNameModalOpen] = useState(false);
+  const [isSecretConfigModalOpen, setIsSecretConfigModalOpen] = useState(false);
+  const isSecretConfigModalOpenRef = useRef(isSecretConfigModalOpen);
+
+  // Update ref when state changes
+  useEffect(() => {
+    isSecretConfigModalOpenRef.current = isSecretConfigModalOpen;
+  }, [isSecretConfigModalOpen]);
+  const [pendingStreamStarts, setPendingStreamStarts] = useState<(() => Promise<void>)[] | null>(null);
   const [selectedPresetName, setSelectedPresetName] = useState<string>(() => localStorage.getItem('wrmm.selectedPreset') || '');
   const [monitorHydrated, setMonitorHydrated] = useState<boolean>(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const queryClient = useQueryClient();
+  const isExecutingStreamStartsRef = useRef(false);
   const [isRefreshingCache, setIsRefreshingCache] = useState(false);
   const [colorsRandomized, setColorsRandomized] = useState(false);
   const [monitorErrors, setMonitorErrors] = useState<Partial<Record<keyof MonitorData, string>>>({});
@@ -72,6 +83,10 @@ export const MonitorManager = () => {
   const [status, setStatus] = useState<{ kind: StatusKind; message: string } | null>(null);
   const [isFlashing, setIsFlashing] = useState(false);
   const [activeSection, setActiveSection] = useState('monitor-manager');
+  const [useAlternateColors, setUseAlternateColors] = useState(false);
+  
+  // Track last update time for each stream to avoid cursor jumps
+  const lastUpdateTimeRef = useRef<Record<StreamKey, number>>({} as Record<StreamKey, number>);
 
   // Stream/Agent types and state
   type StreamKey = 'sheetA' | 'sheetB' | 'sheetC' | 'sheetD' | 'vibe';
@@ -84,27 +99,39 @@ export const MonitorManager = () => {
     title: string;
     description: string;
     viewers: number;
-    publicUrl: string;
-    adminUrl: string;
+    publicUrl: string | null;
+    adminUrl: string | null;
     jobId?: string; // Associated orchestrator job ID
     jobStatus?: string; // Status from orchestrator job
     error?: string; // Error message from failed jobs
-    team1?: string;
-    team2?: string;
+    redTeam?: string;
+    yellowTeam?: string;
   }
 
   const streamOrder: StreamKey[] = ['sheetA','sheetB','sheetC','sheetD','vibe'];
   const [streams, setStreams] = useState<Record<StreamKey, StreamState>>({
-    sheetA: { key: 'sheetA', name: 'Sheet A', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: 'https://example.com/sheet-a', adminUrl: 'https://studio.youtube.com/sheet-a', team1: '', team2: '' },
-    sheetB: { key: 'sheetB', name: 'Sheet B', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: 'https://example.com/sheet-b', adminUrl: 'https://studio.youtube.com/sheet-b', team1: '', team2: '' },
-    sheetC: { key: 'sheetC', name: 'Sheet C', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: 'https://example.com/sheet-c', adminUrl: 'https://studio.youtube.com/sheet-c', team1: '', team2: '' },
-    sheetD: { key: 'sheetD', name: 'Sheet D', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: 'https://example.com/sheet-d', adminUrl: 'https://studio.youtube.com/sheet-d', team1: '', team2: '' },
-    vibe:   { key: 'vibe',   name: 'Vibe Stream', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: 'https://example.com/vibe', adminUrl: 'https://studio.youtube.com/vibe', team1: '', team2: '' },
+    sheetA: { key: 'sheetA', name: 'Sheet A', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetB: { key: 'sheetB', name: 'Sheet B', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetC: { key: 'sheetC', name: 'Sheet C', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetD: { key: 'sheetD', name: 'Sheet D', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    vibe:   { key: 'vibe',   name: 'Vibe Stream', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
   });
   const [selectedStreams, setSelectedStreams] = useState<StreamKey[]>([]);
 
   // Use orchestrator hook for real-time data
   const { agents: orchestratorAgents, jobs: orchestratorJobs, isConnected: orchestratorConnected } = useOrchestrator();
+
+  // Helper function to convert StreamKey to sheet identifier
+  const getSheetIdentifier = (streamKey: StreamKey): 'A' | 'B' | 'C' | 'D' | 'vibe' => {
+    switch (streamKey) {
+      case 'sheetA': return 'A';
+      case 'sheetB': return 'B';
+      case 'sheetC': return 'C';
+      case 'sheetD': return 'D';
+      case 'vibe': return 'vibe';
+      default: return 'A';
+    }
+  };
 
   // Map orchestrator data to UI concepts
   // Deduplicate agents by name, preferring online agents over offline ones
@@ -149,45 +176,67 @@ export const MonitorManager = () => {
 
   // Update streams based on orchestrator jobs
   const streamsWithJobs = useMemo(() => {
-    const updatedStreams = { ...streams };
+    const updatedStreams: Record<StreamKey, StreamState> = {} as Record<StreamKey, StreamState>;
 
-    // Reset all streams to not live initially
-    Object.keys(updatedStreams).forEach(key => {
-      updatedStreams[key as StreamKey].isLive = false;
-      updatedStreams[key as StreamKey].jobId = undefined;
-      updatedStreams[key as StreamKey].jobStatus = undefined;
+    // Reset all streams to not live initially (create new objects)
+    Object.keys(streams).forEach(key => {
+      updatedStreams[key as StreamKey] = {
+        ...streams[key as StreamKey],
+        isLive: false,
+        jobId: undefined,
+        jobStatus: undefined,
+      };
     });
 
-    // Set streams live based on running jobs or handle failed jobs
+    // Set streams based on jobs - show URLs as soon as metadata is available
     orchestratorJobs.forEach(job => {
       if (job.inlineConfig?.streamKey) {
         const streamKey = job.inlineConfig.streamKey as StreamKey;
         if (updatedStreams[streamKey]) {
+          const metadata = job.streamMetadata;
+
+          // Use metadata from orchestrator for URLs and other data, regardless of job status
+          const baseStreamData = {
+            ...updatedStreams[streamKey],
+            jobId: job.id,
+            jobStatus: job.status,
+            // Only show real YouTube URLs when available from metadata
+            publicUrl: metadata?.publicUrl || null,
+            adminUrl: metadata?.adminUrl || null,
+            // ONLY use metadata for title/description (which gets synced to local state via useEffect)
+            // Never use inlineConfig as it contains the pre-generation values
+            title: updatedStreams[streamKey].title,
+            description: updatedStreams[streamKey].description,
+          };
+
           if (job.status === 'RUNNING') {
-            // Use streamMetadata if available, otherwise fall back to inlineConfig or local state
-            const metadata = job.streamMetadata;
+            // Running jobs are live and show real-time data
             updatedStreams[streamKey] = {
-              ...updatedStreams[streamKey],
+              ...baseStreamData,
               isLive: true,
-              jobId: job.id,
-              jobStatus: job.status,
-              // Use metadata from orchestrator, with fallbacks
-              title: metadata?.title || (job.inlineConfig?.title as string) || updatedStreams[streamKey].title,
-              description: metadata?.description || (job.inlineConfig?.description as string) || updatedStreams[streamKey].description,
-              viewers: metadata?.viewers ?? 0, // Use real viewer count from orchestrator, default to 0
-              publicUrl: metadata?.publicUrl || (job.inlineConfig?.publicUrl as string) || updatedStreams[streamKey].publicUrl,
-              adminUrl: metadata?.adminUrl || (job.inlineConfig?.adminUrl as string) || updatedStreams[streamKey].adminUrl,
-              // muted state comes from metadata if available
+              viewers: metadata?.viewers ?? 0, // Use real viewer count from orchestrator
               muted: metadata?.isMuted ?? updatedStreams[streamKey].muted,
             };
           } else if (job.status === 'FAILED' && job.error) {
             // Handle failed jobs by showing error state
             updatedStreams[streamKey] = {
-              ...updatedStreams[streamKey],
+              ...baseStreamData,
               isLive: false,
-              jobId: job.id,
-              jobStatus: job.status,
               error: job.error.message,
+            };
+          } else if (job.status === 'DISMISSED') {
+            // Dismissed jobs don't show any error state
+            updatedStreams[streamKey] = {
+              ...baseStreamData,
+              isLive: false,
+              error: undefined,
+            };
+          } else {
+            // Other job statuses (CREATED, PENDING, ASSIGNED, ACCEPTED, etc.)
+            // Show URLs but not live status
+            updatedStreams[streamKey] = {
+              ...baseStreamData,
+              isLive: false,
             };
           }
         }
@@ -197,65 +246,178 @@ export const MonitorManager = () => {
     return updatedStreams;
   }, [streams, orchestratorJobs]);
 
+  // Sync title/description from job metadata to local state
+  useEffect(() => {
+    orchestratorJobs.forEach(job => {
+      if (job.inlineConfig?.streamKey && job.streamMetadata) {
+        const streamKey = job.inlineConfig.streamKey as StreamKey;
+        const metadata = job.streamMetadata;
+        
+        // Skip syncing if we just updated this stream (prevents cursor jumps while typing)
+        const lastUpdate = lastUpdateTimeRef.current[streamKey] || 0;
+        const timeSinceUpdate = Date.now() - lastUpdate;
+        if (timeSinceUpdate < 2000) {
+          // Skip syncing for 2 seconds after user edits
+          return;
+        }
+        
+        setStreams(prev => {
+          const currentStream = prev[streamKey];
+          
+          // Check if we need to update
+          const titleNeedsSync = metadata.title !== undefined && currentStream.title !== metadata.title;
+          const descriptionNeedsSync = metadata.description !== undefined && currentStream.description !== metadata.description;
+          
+          if (titleNeedsSync || descriptionNeedsSync) {
+            return {
+              ...prev,
+              [streamKey]: {
+                ...currentStream,
+                title: metadata.title ?? currentStream.title,
+                description: metadata.description ?? currentStream.description,
+              }
+            };
+          }
+          
+          return prev;
+        });
+      }
+    });
+  }, [orchestratorJobs]);
+
+  // Stream start function that contains the actual logic
+  const startStream = async (key: StreamKey) => {
+    console.log(`🎬 startStream called for key: ${key}`);
+    let stream = streams[key];
+
+    // Auto-populate team names from monitors if they're blank (for non-vibe streams)
+    if (key !== 'vibe' && (!stream.redTeam || !stream.yellowTeam)) {
+      try {
+        console.log(`🎬 Auto-populating team names for ${key}`);
+        const data = await apiClient.getMonitors();
+        const sheetKey = key.replace('sheet', '').toUpperCase(); // 'sheetA' -> 'A'
+        const sheet = (data as any)[sheetKey];
+        
+        if (sheet && sheet.status === 'online') {
+          // Parse text into players array (split by newlines)
+          const redPlayers = sheet.red?.text ? sheet.red.text.split('\n').filter((line: string) => line.trim()) : [];
+          const yellowPlayers = sheet.yellow?.text ? sheet.yellow.text.split('\n').filter((line: string) => line.trim()) : [];
+          
+          // Extract team names using the same logic as synchronize
+          const extractTeamName = (players: string[]): string => {
+            if (!players || players.length === 0) return '';
+            
+            const getLastName = (fullName: string): string => {
+              const parts = fullName.trim().split(/\s+/);
+              return parts.length > 0 ? parts[parts.length - 1] : '';
+            };
+            
+            const lineCount = players.length;
+            
+            if (lineCount === 4) {
+              return getLastName(players[0]);
+            } else if (lineCount === 5) {
+              return getLastName(players[1]);
+            } else if (lineCount === 2) {
+              const last1 = getLastName(players[0]);
+              const last2 = getLastName(players[1]);
+              return `${last1}/${last2}`;
+            } else if (lineCount === 3) {
+              const last1 = getLastName(players[1]);
+              const last2 = getLastName(players[2]);
+              return `${last1}/${last2}`;
+            }
+            
+            return getLastName(players[0]);
+          };
+          
+          const redTeam = !stream.redTeam ? extractTeamName(redPlayers) : stream.redTeam;
+          const yellowTeam = !stream.yellowTeam ? extractTeamName(yellowPlayers) : stream.yellowTeam;
+          
+          console.log(`🎬 Populated team names: red="${redTeam}", yellow="${yellowTeam}"`);
+          
+          // Update stream object with populated team names
+          stream = {
+            ...stream,
+            ...(redTeam && { redTeam }),
+            ...(yellowTeam && { yellowTeam })
+          };
+          
+          // Update state
+          setStreams(prev => ({
+            ...prev,
+            [key]: stream
+          }));
+          
+          // Send to orchestrator
+          const sheetId = getSheetIdentifier(key);
+          await apiClient.updateTeamNames(sheetId, redTeam || undefined, yellowTeam || undefined);
+        }
+      } catch (err) {
+        console.error('Failed to auto-populate team names from monitors:', err);
+        // Continue with stream start even if auto-populate fails
+      }
+    }
+
+    const idempotencyKey = `stream-${key}-${Date.now()}`;
+    console.log(`🎬 startStream: Generated idempotency key: ${idempotencyKey}`);
+
+    const jobRequest = {
+      inlineConfig: {
+        streamKey: key,
+        streamName: stream.name,
+        title: stream.title, // Send empty string if blank - backend will auto-generate
+        description: stream.description, // Send empty string if blank - backend will auto-generate
+        muted: stream.muted,
+      },
+      streamContext: {
+        context: selectedContext || 'Triangle Curling',
+        sheet: getSheetIdentifier(key),
+        team1: stream.redTeam || undefined,
+        team2: stream.yellowTeam || undefined,
+      },
+      idempotencyKey,
+      restartPolicy: 'never' as const,
+    };
+
+    console.log(`🎬 startStream: Calling apiClient.createJob for ${key}`);
+    // Create the job
+    const job = await apiClient.createJob(jobRequest);
+    console.log(`🎬 startStream: Job created successfully for ${key}, job ID: ${job.id}`);
+
+    // The backend sets all the metadata (title, description, URLs) when creating the job
+    // No need to update it here - it will come through via WebSocket
+  };
+
   // Stream handlers using orchestrator
   const toggleLive = async (key: StreamKey, live: boolean) => {
     try {
       if (live) {
-        // Start stream - create a job
-        const stream = streams[key];
-        // Convert StreamKey to sheet identifier for streamContext
-        const getSheetIdentifier = (streamKey: StreamKey): 'A' | 'B' | 'C' | 'D' | 'vibe' => {
-          switch (streamKey) {
-            case 'sheetA': return 'A';
-            case 'sheetB': return 'B';
-            case 'sheetC': return 'C';
-            case 'sheetD': return 'D';
-            case 'vibe': return 'vibe';
-            default: return 'A';
-          }
-        };
-
-        const jobRequest = {
-          inlineConfig: {
-            streamKey: key,
-            streamName: stream.name,
-            title: stream.title || stream.name,
-            description: stream.description || '',
-            muted: stream.muted,
-            publicUrl: stream.publicUrl,
-            adminUrl: stream.adminUrl,
-          },
-          streamContext: {
-            context: selectedContext || 'Triangle Curling',
-            sheet: getSheetIdentifier(key),
-            team1: stream.team1 || undefined,
-            team2: stream.team2 || undefined,
-          },
-          idempotencyKey: `stream-${key}-${Date.now()}`,
-          restartPolicy: 'never' as const,
-        };
-
-        // Create the job
-        const job = await apiClient.createJob(jobRequest);
-
-        // Set initial metadata for the stream
-        if (job.id) {
-          await apiClient.updateJobMetadata(job.id, {
-            title: stream.title || stream.name,
-            description: stream.description || '',
-            isMuted: stream.muted,
-            publicUrl: stream.publicUrl,
-            adminUrl: stream.adminUrl,
-            platform: 'youtube', // Default platform, can be made configurable
-          });
-        }
-
-        setSuccess(`Started ${stream.name}`);
+        // Start stream - queue for countdown modal
+        // Team name auto-population now happens inside startStream
+        queueStreamsForStart([() => startStream(key)]);
       } else {
         // Stop stream - find and stop the job
         const stream = streamsWithJobs[key];
         if (stream.jobId) {
           await apiClient.stopJob(stream.jobId);
+          
+          // Clear team names when stopping (except for vibe)
+          if (key !== 'vibe') {
+            setStreams(prev => ({
+              ...prev,
+              [key]: {
+                ...prev[key],
+                redTeam: '',
+                yellowTeam: ''
+              }
+            }));
+            
+            // Clear team names in orchestrator
+            const sheetId = getSheetIdentifier(key);
+            await apiClient.updateTeamNames(sheetId, '', '');
+          }
+          
           setSuccess(`Stopped ${stream.name}`);
         }
       }
@@ -267,31 +429,78 @@ export const MonitorManager = () => {
 
   const updateTitle = async (key: StreamKey, title: string) => {
     const stream = streamsWithJobs[key];
+    
+    // Mark that we just updated this stream (to prevent cursor jumps from syncing)
+    lastUpdateTimeRef.current[key] = Date.now();
+    
+    // Always update local state immediately for responsive UI
+    setStreams(prev => ({ ...prev, [key]: { ...prev[key], title } }));
+    
     if (stream.jobId) {
+      // If there's an active job, also update the job metadata
+      // This will be debounced and sent to YouTube API if the stream is running
       try {
         await apiClient.updateJobMetadata(stream.jobId, { title });
-        setSuccess(`Updated title for ${stream.name}`);
+        // The WebSocket update will sync the authoritative value back
       } catch (error: any) {
         setError(`Failed to update title: ${error.message}`);
       }
-    } else {
-      // No active job, update local state
-      setStreams(prev => ({ ...prev, [key]: { ...prev[key], title } }));
+    }
+  };
+
+  const dismissStreamError = async (key: StreamKey) => {
+    const stream = streamsWithJobs[key];
+    if (!stream.jobId) {
+      console.log(`No job ID found for stream: ${key}`);
+      return;
+    }
+
+    try {
+      console.log(`Dismissing error for stream: ${key}, job: ${stream.jobId}`);
+      await apiClient.dismissJob(stream.jobId);
+      setSuccess(`Cleared error state for ${stream.name}`);
+    } catch (error: any) {
+      console.error(`Failed to dismiss error for stream ${key}:`, error);
+      setError(`Failed to dismiss error: ${error.message}`);
     }
   };
 
   const updateDescription = async (key: StreamKey, description: string) => {
     const stream = streamsWithJobs[key];
+    
+    // Mark that we just updated this stream (to prevent cursor jumps from syncing)
+    lastUpdateTimeRef.current[key] = Date.now();
+    
+    // Always update local state immediately for responsive UI
+    setStreams(prev => ({ ...prev, [key]: { ...prev[key], description } }));
+    
     if (stream.jobId) {
+      // If there's an active job, also update the job metadata
+      // This will be debounced and sent to YouTube API if the stream is running
       try {
         await apiClient.updateJobMetadata(stream.jobId, { description });
-        setSuccess(`Updated description for ${stream.name}`);
       } catch (error: any) {
         setError(`Failed to update description: ${error.message}`);
       }
-    } else {
-      // No active job, update local state
-      setStreams(prev => ({ ...prev, [key]: { ...prev[key], description } }));
+    }
+  };
+
+  const updateTeamNames = async (key: StreamKey, red?: string, yellow?: string) => {
+    try {
+      const sheet = getSheetIdentifier(key);
+      await apiClient.updateTeamNames(sheet, red, yellow);
+      // Update local state
+      const updates: Partial<StreamState> = {};
+      if (red !== undefined) updates.redTeam = red;
+      if (yellow !== undefined) updates.yellowTeam = yellow;
+      setStreams(prev => ({ ...prev, [key]: { ...prev[key], ...updates } }));
+    } catch (error: any) {
+      console.error(`Failed to update team names for ${key}:`, error);
+      // Still update local state even if API call fails
+      const updates: Partial<StreamState> = {};
+      if (red !== undefined) updates.redTeam = red;
+      if (yellow !== undefined) updates.yellowTeam = yellow;
+      setStreams(prev => ({ ...prev, [key]: { ...prev[key], ...updates } }));
     }
   };
 
@@ -395,6 +604,45 @@ export const MonitorManager = () => {
     return combined.length;
   };
 
+  // Stream start countdown functions
+  const queueStreamsForStart = (streamFunctions: (() => Promise<void>)[]) => {
+    setPendingStreamStarts(streamFunctions);
+  };
+
+  const executePendingStreamStarts = async () => {
+    console.log('🚀 executePendingStreamStarts called', {
+      hasPending: !!pendingStreamStarts,
+      isAlreadyExecuting: isExecutingStreamStartsRef.current,
+      pendingCount: pendingStreamStarts?.length || 0
+    });
+
+    if (!pendingStreamStarts || isExecutingStreamStartsRef.current) {
+      console.log('🚀 executePendingStreamStarts: Skipping (no pending or already executing)');
+      return;
+    }
+
+    isExecutingStreamStartsRef.current = true;
+    console.log('🚀 executePendingStreamStarts: Starting execution');
+    setBusy('Starting streams...');
+    try {
+      await Promise.all(pendingStreamStarts.map((fn, index) => {
+        console.log(`🚀 executePendingStreamStarts: Executing function ${index + 1}/${pendingStreamStarts!.length}`);
+        return fn();
+      }));
+      setSuccess(`Started ${pendingStreamStarts.length} stream(s)`);
+    } catch (error: any) {
+      setError(`Failed to start streams: ${error.message}`);
+    } finally {
+      setPendingStreamStarts(null);
+      isExecutingStreamStartsRef.current = false;
+      console.log('🚀 executePendingStreamStarts: Completed execution');
+    }
+  };
+
+  const cancelPendingStreamStarts = () => {
+    setPendingStreamStarts(null);
+  };
+
   const canStart = () => {
     const notRunning = selectedButNotRunning();
     return notRunning.length > 0 && availableAgents() >= notRunning.length;
@@ -403,13 +651,11 @@ export const MonitorManager = () => {
   const bulkStart = async () => {
     if (!canStart()) return;
     const streamsToStart = selectedButNotRunning();
-    setBusy('Starting streams...');
-    try {
-      await Promise.all(streamsToStart.map((k: StreamKey) => toggleLive(k, true)));
-      setSuccess(`Started ${streamsToStart.length} stream(s)`);
-    } catch (error: any) {
-      setError(`Failed to start streams: ${error.message}`);
-    }
+
+    // Queue the stream start functions for the countdown modal
+    const streamFunctions = streamsToStart.map((k: StreamKey) => () => startStream(k));
+
+    queueStreamsForStart(streamFunctions);
   };
 
   const bulkStop = async () => {
@@ -439,6 +685,46 @@ export const MonitorManager = () => {
       return () => clearTimeout(timer);
     }
   }, [status]);
+
+  // Load alternate colors setting and team names on mount
+  useEffect(() => {
+    apiClient.getAlternateColors()
+      .then(result => setUseAlternateColors(result.alternateColors))
+      .catch(err => console.error('Failed to load alternate colors setting:', err));
+    
+    // Fetch team names from orchestrator
+    fetch('http://localhost:3014/v1/teamnames')
+      .then(res => res.json())
+      .then(teamNamesData => {
+        // teamNamesData structure: { A: { red: '', yellow: '' }, B: { ... }, ... }
+        setStreams(prev => {
+          const next = { ...prev };
+          
+          // Map orchestrator sheet IDs to stream keys
+          const sheetMapping: Record<string, StreamKey> = {
+            'A': 'sheetA',
+            'B': 'sheetB',
+            'C': 'sheetC',
+            'D': 'sheetD',
+            'vibe': 'vibe'
+          };
+          
+          // Update each sheet with team names from orchestrator
+          Object.entries(sheetMapping).forEach(([sheetId, streamKey]) => {
+            if (teamNamesData[sheetId]) {
+              next[streamKey] = {
+                ...prev[streamKey],
+                redTeam: teamNamesData[sheetId].red || '',
+                yellowTeam: teamNamesData[sheetId].yellow || ''
+              };
+            }
+          });
+          
+          return next;
+        });
+      })
+      .catch(err => console.error('Failed to load team names from orchestrator:', err));
+  }, []);
 
   // Auto-scroll to section on page load if URL has fragment
   useEffect(() => {
@@ -719,6 +1005,27 @@ export const MonitorManager = () => {
       localStorage.setItem('wrmm.editModes', JSON.stringify(editModes));
     } catch {}
   }, [editModes]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Open secret config with "CTRL + SHIFT + /" key chord
+      // Note: SHIFT + / produces key="?" in the event
+      if (e.key === '?' && e.ctrlKey && e.shiftKey) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setIsSecretConfigModalOpen(true);
+        return;
+      }
+      // Close secret config modal with Escape
+      if (e.key === 'Escape' && isSecretConfigModalOpenRef.current) {
+        setIsSecretConfigModalOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true); // Use capture phase on window to get events before other handlers
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, []); // Empty dependency array - stable event listener
 
   const setFieldEditMode = (sheet: keyof MonitorData, team: 'red' | 'yellow', mode: EditMode) => {
     const key = storageKeyFor(selectedContext, sheet, team);
@@ -2145,42 +2452,120 @@ export const MonitorManager = () => {
                     className="btn btn-secondary text-sm px-4 py-2"
                     onClick={async () => {
                       try {
-                        const data = await apiClient.getMonitorsRich();
-                        const extractSkipLast = (team?: { fourth?: string; third?: string; second?: string; lead?: string; skipPosition?: string }) => {
-                          if (!team) return '';
-                          const posToName: Record<string, string | undefined> = {
-                            fourth: team.fourth,
-                            third: team.third,
-                            second: team.second,
-                            lead: team.lead,
+                        const data = await apiClient.getMonitors();
+                        console.log('Monitor data received:', data);
+                        
+                        // Extract team name based on number of players
+                        const extractTeamName = (players: string[]): string => {
+                          if (!players || players.length === 0) return '';
+                          
+                          // Helper to get last name from a full name string
+                          const getLastName = (fullName: string): string => {
+                            const parts = fullName.trim().split(/\s+/);
+                            return parts.length > 0 ? parts[parts.length - 1] : '';
                           };
-                          const skipName = posToName[(team.skipPosition || 'fourth')] || '';
-                          const parts = String(skipName).trim().split(/\s+/);
-                          return parts.length ? parts[parts.length - 1] : '';
+                          
+                          const lineCount = players.length;
+                          
+                          if (lineCount === 4) {
+                            // 4 lines: First line is skip (first and last name) - use last name
+                            return getLastName(players[0]);
+                          } else if (lineCount === 5) {
+                            // 5 lines: Second line is skip - use last name
+                            return getLastName(players[1]);
+                          } else if (lineCount === 2) {
+                            // 2 lines: Doubles game - format as "LastName1/LastName2"
+                            const last1 = getLastName(players[0]);
+                            const last2 = getLastName(players[1]);
+                            return `${last1}/${last2}`;
+                          } else if (lineCount === 3) {
+                            // 3 lines: Ignore first line, treat as doubles (lines 2 and 3)
+                            const last1 = getLastName(players[1]);
+                            const last2 = getLastName(players[2]);
+                            return `${last1}/${last2}`;
+                          }
+                          
+                          // Fallback: use first line's last name
+                          return getLastName(players[0]);
                         };
-                        const next = { ...streams };
-                        const mapSheet = (sheetKey: StreamKey, sheet?: any) => {
-                          if (!sheet || sheet.status !== 'online') return;
-                          const redSkip = extractSkipLast(sheet.red?.team);
-                          const yellowSkip = extractSkipLast(sheet.yellow?.team);
-                          // Assign in natural order
-                          (next as any)[sheetKey].team1 = redSkip || (next as any)[sheetKey].team1;
-                          (next as any)[sheetKey].team2 = yellowSkip || (next as any)[sheetKey].team2;
-                        };
-                        mapSheet('sheetA', (data as any).A);
-                        mapSheet('sheetB', (data as any).B);
-                        mapSheet('sheetC', (data as any).C);
-                        mapSheet('sheetD', (data as any).D);
-                        setStreams(next);
+                        
+                        // Update streams with proper immutability
+                        setStreams(prev => {
+                          const next = { ...prev };
+                          
+                          const mapSheet = (sheetKey: StreamKey, sheet?: any) => {
+                            if (!sheet || sheet.status !== 'online') {
+                              console.log(`Skipping ${sheetKey}: not online or no data`);
+                              return;
+                            }
+                            
+                            // Parse text into players array (split by newlines)
+                            const redPlayers = sheet.red?.text ? sheet.red.text.split('\n').filter((line: string) => line.trim()) : [];
+                            const yellowPlayers = sheet.yellow?.text ? sheet.yellow.text.split('\n').filter((line: string) => line.trim()) : [];
+                            
+                            console.log(`Processing ${sheetKey}:`, {
+                              redPlayers,
+                              yellowPlayers
+                            });
+                            
+                            const redTeam = extractTeamName(redPlayers);
+                            const yellowTeam = extractTeamName(yellowPlayers);
+                            
+                            console.log(`Extracted team names for ${sheetKey}:`, { redTeam, yellowTeam });
+                            
+                            // Create new stream object with updated team names
+                            if (redTeam || yellowTeam) {
+                              next[sheetKey] = {
+                                ...prev[sheetKey],
+                                ...(redTeam && { redTeam }),
+                                ...(yellowTeam && { yellowTeam })
+                              };
+                              
+                              console.log(`Updated ${sheetKey} state:`, next[sheetKey]);
+                              
+                              // Send to orchestrator
+                              const sheetId = getSheetIdentifier(sheetKey);
+                              apiClient.updateTeamNames(sheetId, redTeam || undefined, yellowTeam || undefined).catch(err => {
+                                console.error(`Failed to update teams for ${sheetKey}:`, err);
+                              });
+                            }
+                          };
+                          
+                          mapSheet('sheetA', (data as any).A);
+                          mapSheet('sheetB', (data as any).B);
+                          mapSheet('sheetC', (data as any).C);
+                          mapSheet('sheetD', (data as any).D);
+                          
+                          return next;
+                        });
                         setSuccess('Synchronized team names from monitors');
                       } catch (e: any) {
                         setError(e?.message || 'Failed to synchronize team names');
                       }
                     }}
-                    title="Set team names from monitors (skip last names)"
+                    title="Set team names from monitors (skip last names or doubles format)"
                   >
                     Synchronize with Monitors
                   </button>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none" title="Use blue/green colors instead of red/yellow in browser sources">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={useAlternateColors}
+                      onChange={async (e) => {
+                        const newValue = e.target.checked;
+                        setUseAlternateColors(newValue);
+                        try {
+                          await apiClient.updateAlternateColors(newValue);
+                          setSuccess(`Alternate colors ${newValue ? 'enabled' : 'disabled'} - browser sources will ${newValue ? 'use blue/green' : 'use red/yellow'}`);
+                        } catch (err: any) {
+                          setError(`Failed to update alternate colors: ${err.message}`);
+                          setUseAlternateColors(!newValue); // Revert on error
+                        }
+                      }}
+                    />
+                    Use Alternate Colors
+                  </label>
                 </div>
               </div>
             </div>
@@ -2206,7 +2591,16 @@ export const MonitorManager = () => {
                           <span className="text-sm text-gray-600">Viewers: {s.viewers}</span>
                         </div>
                         {s.error && (
-                          <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-800">
+                          <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-800 relative">
+                            <button
+                              onClick={() => dismissStreamError(key)}
+                              className="absolute top-1 right-1 w-5 h-5 flex items-center justify-center text-red-600 hover:text-red-800 hover:bg-red-100 rounded-full transition-colors"
+                              title="Dismiss error"
+                            >
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
                             <strong>Error:</strong> {s.error}
                           </div>
                         )}
@@ -2244,28 +2638,46 @@ export const MonitorManager = () => {
                       <div className="grid grid-cols-1 gap-2">
                         <div className="flex flex-col">
                           <label className="text-sm font-medium text-gray-700 mb-1">Title</label>
-                          <input className="px-3 py-2 border border-gray-300 rounded-md" placeholder="<Autogenerated>" value={s.title} onChange={e => updateTitle(key, e.target.value)} />
+                          <input 
+                            className="px-3 py-2 border border-gray-300 rounded-md" 
+                            placeholder="<Autogenerated>" 
+                            value={s.title}
+                            onChange={e => updateTitle(key, e.target.value)} 
+                          />
                         </div>
                         <div className="flex flex-col">
                           <label className="text-sm font-medium text-gray-700 mb-1">Description</label>
-                          <textarea className="px-3 py-2 border border-gray-300 rounded-md min-h-[84px]" placeholder="<Autogenerated>" value={s.description} onChange={e => updateDescription(key, e.target.value)} />
+                          <textarea 
+                            className="px-3 py-2 border border-gray-300 rounded-md min-h-[84px]" 
+                            placeholder="<Autogenerated>" 
+                            value={s.description}
+                            onChange={e => updateDescription(key, e.target.value)} 
+                          />
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div className="flex flex-col">
-                            <label className="text-sm font-medium text-gray-700 mb-1">Team 1</label>
-                            <input className="px-3 py-2 border border-gray-300 rounded-md" placeholder="<Skip last name>" value={s.team1 || ''} onChange={e => setStreams(prev => ({ ...prev, [key]: { ...prev[key], team1: e.target.value } }))} />
+                        {key !== 'vibe' && (
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="flex flex-col">
+                              <label className="text-sm font-medium mb-1" style={{ color: useAlternateColors ? '#3B82F6' : '#DC2626' }}>
+                                {useAlternateColors ? 'Blue Team' : 'Red Team'}
+                              </label>
+                              <input className="px-3 py-2 border border-gray-300 rounded-md" placeholder="<Skip last name>" value={s.redTeam || ''} onChange={e => updateTeamNames(key, e.target.value, undefined)} />
+                            </div>
+                            <div className="flex flex-col">
+                              <label className="text-sm font-medium mb-1" style={{ color: useAlternateColors ? '#10B981' : '#EAB308' }}>
+                                {useAlternateColors ? 'Green Team' : 'Yellow Team'}
+                              </label>
+                              <input className="px-3 py-2 border border-gray-300 rounded-md" placeholder="<Skip last name>" value={s.yellowTeam || ''} onChange={e => updateTeamNames(key, undefined, e.target.value)} />
+                            </div>
                           </div>
-                          <div className="flex flex-col">
-                            <label className="text-sm font-medium text-gray-700 mb-1">Team 2</label>
-                            <input className="px-3 py-2 border border-gray-300 rounded-md" placeholder="<Skip last name>" value={s.team2 || ''} onChange={e => setStreams(prev => ({ ...prev, [key]: { ...prev[key], team2: e.target.value } }))} />
-                          </div>
+                        )}
+                      </div>
+                      {s.publicUrl && s.adminUrl && (
+                        <div className="flex items-center gap-3 text-sm">
+                          <a href={s.publicUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:text-blue-700" title="Open public stream">Public link</a>
+                          <span className="text-gray-300">|</span>
+                          <a href={s.adminUrl} target="_blank" rel="noreferrer" className="text-gray-700 hover:text-gray-900" title="Open YouTube Studio">Studio Admin</a>
                         </div>
-                      </div>
-                      <div className="flex items-center gap-3 text-sm">
-                        <a href={s.publicUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:text-blue-700" title="Open public stream">Public link</a>
-                        <span className="text-gray-300">|</span>
-                        <a href={s.adminUrl} target="_blank" rel="noreferrer" className="text-gray-700 hover:text-gray-900" title="Open admin dashboard">Admin dashboard</a>
-                      </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -2317,26 +2729,46 @@ export const MonitorManager = () => {
                         <div className="mt-1 text-xs text-gray-500">Assigned to: {streamsWithJobs[a.assignedStreamKey].name}</div>
                       )}
                       {orchestratorAgent && (
-                        <div className="mt-2 flex items-center gap-2">
-                          <label className="text-xs text-gray-600">Drain mode:</label>
+                        <div className="mt-2 space-y-1">
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs text-gray-600">Drain mode:</label>
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await apiClient.setAgentDrain(a.id, !orchestratorAgent.drain);
+                                  setSuccess(`${orchestratorAgent.drain ? 'Disabled' : 'Enabled'} drain mode for ${a.name}`);
+                                } catch (error: any) {
+                                  setError(`Failed to set drain mode: ${error.message}`);
+                                }
+                              }}
+                              className={`text-xs px-2 py-1 rounded disabled:opacity-50 ${
+                                orchestratorAgent.drain
+                                  ? 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200'
+                                  : 'bg-gray-100 text-gray-800 hover:bg-gray-200'
+                              }`}
+                              disabled={!orchestratorConnected}
+                              title={orchestratorConnected ? `${orchestratorAgent.drain ? 'Disable' : 'Enable'} drain mode` : 'Orchestrator offline'}
+                            >
+                              {orchestratorConnected ? (orchestratorAgent.drain ? 'ON' : 'OFF') : 'N/A'}
+                            </button>
+                          </div>
                           <button
                             onClick={async () => {
+                              if (!confirm(`Are you sure you want to reboot agent "${a.name}"? This will restart the entire machine.`)) {
+                                return;
+                              }
                               try {
-                                await apiClient.setAgentDrain(a.id, !orchestratorAgent.drain);
-                                setSuccess(`${orchestratorAgent.drain ? 'Disabled' : 'Enabled'} drain mode for ${a.name}`);
+                                const result = await apiClient.rebootAgent(a.id, 'Reboot requested from UI');
+                                setSuccess(`Reboot command sent to ${a.name} via ${result.method || 'unknown method'}`);
                               } catch (error: any) {
-                                setError(`Failed to set drain mode: ${error.message}`);
+                                setError(`Failed to reboot agent: ${error.message}`);
                               }
                             }}
-                            className={`text-xs px-2 py-1 rounded disabled:opacity-50 ${
-                              orchestratorAgent.drain
-                                ? 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200'
-                                : 'bg-gray-100 text-gray-800 hover:bg-gray-200'
-                            }`}
+                            className="text-xs px-2 py-1 rounded bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
                             disabled={!orchestratorConnected}
-                            title={orchestratorConnected ? `${orchestratorAgent.drain ? 'Disable' : 'Enable'} drain mode` : 'Orchestrator offline'}
+                            title={orchestratorConnected ? 'Reboot this agent via SSH' : 'Orchestrator offline'}
                           >
-                            {orchestratorConnected ? (orchestratorAgent.drain ? 'ON' : 'OFF') : 'N/A'}
+                            🔄 Reboot
                           </button>
                         </div>
                       )}
@@ -2400,6 +2832,18 @@ export const MonitorManager = () => {
         initial={teamSaveInitial}
         onSave={onSaveTeam}
         onCancel={() => setTeamSaveInitial(null)}
+      />
+    )}
+    {isSecretConfigModalOpen && (
+      <SecretConfigModal
+        onClose={() => setIsSecretConfigModalOpen(false)}
+      />
+    )}
+    {pendingStreamStarts && (
+      <StreamStartCountdownModal
+        streamCount={pendingStreamStarts.length}
+        onConfirm={executePendingStreamStarts}
+        onCancel={cancelPendingStreamStarts}
       />
     )}
   </div>

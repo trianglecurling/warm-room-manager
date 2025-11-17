@@ -4,6 +4,8 @@ import { YouTubeMetadata } from '@warm-room-manager/shared';
 const YOUTUBE_CLIENT_ID = process.env.YOUTUBE_CLIENT_ID;
 const YOUTUBE_CLIENT_SECRET = process.env.YOUTUBE_CLIENT_SECRET;
 const YOUTUBE_REFRESH_TOKEN = process.env.YOUTUBE_REFRESH_TOKEN;
+const YOUTUBE_STREAM_PRIVACY = process.env.YOUTUBE_STREAM_PRIVACY || 'unlisted';
+const DISABLE_YOUTUBE_API = process.env.DISABLE_YOUTUBE_API === 'true';
 
 if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET || !YOUTUBE_REFRESH_TOKEN) {
 	console.warn('YouTube OAuth2 credentials not set - YouTube integration will be disabled');
@@ -16,6 +18,13 @@ export class YouTubeService {
 	private oauth2Client;
 
 	constructor() {
+		if (DISABLE_YOUTUBE_API) {
+			console.warn('⚠️  YouTube API calls are DISABLED for testing (DISABLE_YOUTUBE_API=true)');
+			this.youtube = null as any;
+			this.oauth2Client = null as any;
+			return;
+		}
+
 		if (!YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET || !YOUTUBE_REFRESH_TOKEN) {
 			this.youtube = null as any;
 			this.oauth2Client = null as any;
@@ -40,9 +49,47 @@ export class YouTubeService {
 	}
 
 	/**
+	 * Update the OAuth2 refresh token
+	 * This allows updating credentials without restarting the service
+	 */
+	updateRefreshToken(refreshToken: string): void {
+		if (DISABLE_YOUTUBE_API) {
+			return;
+		}
+
+		if (!this.oauth2Client) {
+			console.warn('⚠️  Cannot update refresh token: OAuth2 client not initialized');
+			return;
+		}
+
+		this.oauth2Client.setCredentials({
+			refresh_token: refreshToken
+		});
+
+		console.log('✅ YouTube OAuth2 refresh token updated');
+	}
+
+	/**
 	 * Create a new YouTube live broadcast
 	 */
-	async createLiveBroadcast(title: string, description: string): Promise<YouTubeMetadata> {
+	async createLiveBroadcast(title: string, description: string, privacy?: 'public' | 'unlisted'): Promise<YouTubeMetadata> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Returning mock broadcast data for: "${title}"`);
+
+			// Return mock data for testing
+			const mockBroadcastId = `mock-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+			return {
+				broadcastId: mockBroadcastId,
+				streamId: `mock-stream-${mockBroadcastId}`,
+				streamKey: `mock-stream-key-${mockBroadcastId}`,
+				streamUrl: 'rtmp://mock.youtube.com/live2',
+				privacyStatus: privacy || 'unlisted',
+				scheduledStartTime: new Date(Date.now() + 60000).toISOString(),
+				channelId: 'mock-channel-id',
+				videoId: mockBroadcastId
+			};
+		}
+
 		if (!this.youtube) {
 			throw new Error('YouTube OAuth2 credentials not configured');
 		}
@@ -58,7 +105,7 @@ export class YouTubeService {
 						scheduledStartTime: new Date(Date.now() + 60000).toISOString(), // Start in 1 minute
 					},
 					status: {
-						privacyStatus: 'public',
+						privacyStatus: (privacy || 'unlisted') as 'public' | 'unlisted',
 						selfDeclaredMadeForKids: false, // Explicitly set as not made for kids
 					},
 					contentDetails: {
@@ -120,12 +167,13 @@ export class YouTubeService {
 			});
 
 			// Generate YouTube metadata
+			const actualPrivacy = (privacy || 'unlisted') as 'public' | 'unlisted';
 			const metadata: YouTubeMetadata = {
 				broadcastId: broadcast.id || undefined,
 				streamId: stream.id || undefined,
 				streamKey: stream.cdn?.ingestionInfo?.streamName || undefined,
 				streamUrl: stream.cdn?.ingestionInfo?.ingestionAddress || undefined,
-				privacyStatus: 'public',
+				privacyStatus: actualPrivacy,
 				scheduledStartTime: broadcast.snippet?.scheduledStartTime || undefined,
 				channelId: broadcast.snippet?.channelId || undefined,
 				videoId: broadcast.id || undefined, // Broadcast ID is also the video ID
@@ -146,6 +194,15 @@ export class YouTubeService {
 	 * Get broadcast status and statistics
 	 */
 	async getBroadcastStatus(broadcastId: string): Promise<Partial<YouTubeMetadata>> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Returning mock status for broadcast: ${broadcastId}`);
+			return {
+				actualStartTime: new Date().toISOString(),
+				concurrentViewers: Math.floor(Math.random() * 100),
+				totalViewers: Math.floor(Math.random() * 1000)
+			};
+		}
+
 		if (!this.youtube) {
 			throw new Error('YouTube OAuth2 credentials not configured');
 		}
@@ -180,17 +237,36 @@ export class YouTubeService {
 	 * Update broadcast metadata
 	 */
 	async updateBroadcast(broadcastId: string, updates: { title?: string; description?: string }): Promise<void> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Mock update for broadcast: ${broadcastId}`, updates);
+			return;
+		}
+
 		if (!this.youtube) {
 			throw new Error('YouTube OAuth2 credentials not configured');
 		}
 
 		try {
+			// First, get the current broadcast data to preserve required fields
+			const currentBroadcast = await this.youtube.liveBroadcasts.list({
+				part: ['snippet'],
+				id: [broadcastId],
+			});
+
+			const broadcast = currentBroadcast.data.items?.[0];
+			if (!broadcast || !broadcast.snippet) {
+				throw new Error(`Broadcast ${broadcastId} not found`);
+			}
+
+			// Update the broadcast with merged snippet data
 			await this.youtube.liveBroadcasts.update({
 				part: ['snippet'],
 				requestBody: {
 					id: broadcastId,
 					snippet: {
-						...updates,
+						...broadcast.snippet,
+						title: updates.title ?? broadcast.snippet.title,
+						description: updates.description ?? broadcast.snippet.description,
 					},
 				},
 			});
