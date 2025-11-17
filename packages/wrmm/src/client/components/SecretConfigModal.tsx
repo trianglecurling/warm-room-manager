@@ -143,7 +143,7 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
         ssh: {
           host: settings.host,
           user: settings.user || 'Administrator',
-          keyPath: settings.keyPath || undefined,
+          keyPath: settings.keyPath.trim() || undefined,
           rebootCommand: settings.rebootCommand || 'shutdown /r /f /t 0',
         },
       });

@@ -5,7 +5,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { youtubeService, YouTubeService } from "./youtube-service";
 import { randomUUID } from "crypto";
 import { google } from 'googleapis';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -1271,20 +1271,56 @@ app.post<{
 		// Windows reboot command (default, can be overridden)
 		const rebootCommand = sshConfig.rebootCommand || 'shutdown /r /f /t 0';
 		
+		// Normalize key path for Windows
+		let normalizedKeyPath: string | undefined = undefined;
+		if (sshConfig.keyPath && sshConfig.keyPath.trim()) {
+			const rawKeyPath = sshConfig.keyPath.trim();
+			
+			// Verify key file exists
+			if (!existsSync(rawKeyPath)) {
+				console.warn(`⚠️  SSH key file not found: ${rawKeyPath}`);
+				console.warn(`   Will attempt SSH without key file (may prompt for password)`);
+				normalizedKeyPath = undefined;
+			} else {
+				console.log(`✅ SSH key file found: ${rawKeyPath}`);
+				// Convert Windows backslashes to forward slashes for SSH
+				// Windows OpenSSH supports both formats, but forward slashes are more reliable
+				normalizedKeyPath = rawKeyPath.replace(/\\/g, '/');
+			}
+		}
+		
 		// Build SSH command
 		let sshCommand: string;
-		if (sshConfig.keyPath) {
-			sshCommand = `ssh -i "${sshConfig.keyPath}" -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${rebootCommand}"`;
+		if (normalizedKeyPath) {
+			// Escape quotes in the path for shell safety
+			const escapedKeyPath = normalizedKeyPath.replace(/"/g, '\\"');
+			// Use additional SSH options to force key authentication and prevent password prompts
+			// If key auth fails, SSH will error instead of prompting for password
+			sshCommand = `ssh -i "${escapedKeyPath}" -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey ${sshUser}@${sshHost} "${rebootCommand}"`;
 		} else {
 			sshCommand = `ssh -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${rebootCommand}"`;
 		}
 
-		console.log(`Executing SSH command: ${sshCommand.replace(sshConfig.keyPath || '', '[KEY_PATH]')}`);
+		// Log command with key path masked for security
+		const logCommand = normalizedKeyPath 
+			? sshCommand.replace(normalizedKeyPath.replace(/\\/g, '/'), '[KEY_PATH]')
+			: sshCommand;
+		console.log(`Executing SSH command: ${logCommand}`);
+		if (normalizedKeyPath) {
+			console.log(`Using SSH key file: ${normalizedKeyPath}`);
+		} else {
+			console.log(`No SSH key specified, using default SSH keys`);
+		}
 
 		// Execute SSH command (don't wait for completion since machine will reboot)
 		execAsync(sshCommand).catch((error) => {
-			// It's normal for SSH to fail when the machine reboots
-			console.log(`SSH command executed (connection may have closed due to reboot):`, error.message);
+			// It's normal for SSH to fail when the machine reboots, but log other errors
+			if (error.message && !error.message.includes('Connection closed') && !error.message.includes('closed by remote host')) {
+				console.error(`SSH command error:`, error.message);
+				console.error(`Full error:`, error);
+			} else {
+				console.log(`SSH command executed (connection closed due to reboot)`);
+			}
 		});
 
 		return reply.code(202).send({ 
