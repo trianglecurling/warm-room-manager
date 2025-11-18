@@ -1882,15 +1882,27 @@ wssAgents.on("connection", (ws, req) => {
 		(reqObj?.headers?.['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
 		(reqObj?.headers?.['x-real-ip'] as string);
 
+	console.log(`[DEBUG] New WebSocket connection from ${remoteAddress || 'unknown'}, readyState: ${ws.readyState}`);
+
 	ws.on("error", (error) => {
-		console.error(`WebSocket error for agent ${attachedAgentId || 'unknown'}:`, error);
+		console.error(`[ERROR] WebSocket error for agent ${attachedAgentId || 'unknown'} from ${remoteAddress || 'unknown'}:`, error);
+		console.error(`[ERROR] Error details:`, {
+			message: error.message,
+			stack: error.stack,
+			code: (error as any).code,
+			errno: (error as any).errno,
+			syscall: (error as any).syscall
+		});
 		// Try to close the connection gracefully on error
 		try {
 			if (ws.readyState === WebSocket.OPEN) {
+				console.log(`[DEBUG] Closing WebSocket due to error with code 1011`);
 				ws.close(1011, "Internal server error");
+			} else {
+				console.log(`[DEBUG] WebSocket already closed (readyState: ${ws.readyState}), not closing`);
 			}
 		} catch (e) {
-			console.error(`Error closing WebSocket after error:`, e);
+			console.error(`[ERROR] Error closing WebSocket after error:`, e);
 		}
 	});
 
@@ -1941,21 +1953,34 @@ wssAgents.on("connection", (ws, req) => {
 				agents.set(agentId, agent);
 			} else {
 				console.log(`Agent ${name} (${agentId}) reconnecting from ${remoteAddress || 'unknown'}`);
+				console.log(`[DEBUG] Existing agent found. Current WebSocket state: ${agent.ws ? `exists, readyState: ${agent.ws.readyState}` : 'null'}, New WebSocket readyState: ${ws.readyState}`);
+				
 				// Always allow reconnection - clean up any existing WebSocket
 				if (agent.ws && agent.ws !== ws) {
 					const oldWs = agent.ws;
+					console.log(`[DEBUG] Old WebSocket found (different instance), cleaning up. Old readyState: ${oldWs.readyState}, New readyState: ${ws.readyState}`);
+					
 					// Remove close handler from old WebSocket to prevent it from setting agent offline
 					oldWs.removeAllListeners('close');
 					oldWs.removeAllListeners('error');
 					oldWs.removeAllListeners('message');
+					
 					if (oldWs.readyState === WebSocket.OPEN) {
+						console.log(`[DEBUG] Old WebSocket is OPEN, closing it gracefully`);
 						console.log(`Closing previous WebSocket for agent ${agentId}`);
 						try {
-							oldWs.close();
+							oldWs.close(1000, "Replaced by new connection"); // Use normal closure code
 						} catch (e) {
+							console.error(`[ERROR] Error closing old WebSocket:`, e);
 							// Ignore errors when closing old connection
 						}
+					} else {
+						console.log(`[DEBUG] Old WebSocket already closed (readyState: ${oldWs.readyState}), not closing`);
 					}
+				} else if (agent.ws === ws) {
+					console.log(`[DEBUG] Same WebSocket instance - this is likely a duplicate Hello message, not a reconnection`);
+				} else {
+					console.log(`[DEBUG] No existing WebSocket to clean up`);
 				}
 			}
 			agent.ws = ws;
@@ -2153,17 +2178,28 @@ wssAgents.on("connection", (ws, req) => {
 	});
 
 	ws.on("close", (code, reason) => {
-		if (!attachedAgentId) return;
+		console.log(`[DEBUG] WebSocket close event - Code: ${code}, Reason: ${reason?.toString() || 'No reason'}, Agent: ${attachedAgentId || 'unknown'}, Remote: ${remoteAddress || 'unknown'}`);
+		
+		if (!attachedAgentId) {
+			console.log(`[DEBUG] No attached agent ID, ignoring close event`);
+			return;
+		}
+		
 		const agent = agents.get(attachedAgentId);
-		if (!agent) return;
+		if (!agent) {
+			console.log(`[DEBUG] Agent ${attachedAgentId} not found in agents map, ignoring close event`);
+			return;
+		}
 		
 		// Only set offline if this is still the active WebSocket for the agent
 		// This prevents old WebSocket close events from affecting reconnected agents
 		if (agent.ws === ws) {
+			console.log(`[DEBUG] This is the active WebSocket for agent ${agent.name} (${attachedAgentId}), setting offline`);
 			console.log(`Agent ${agent.name} (${attachedAgentId}) disconnected - Code: ${code}, Reason: ${reason?.toString() || 'No reason'}`);
 			setAgentState(agent, "OFFLINE");
 			agent.ws = undefined; // Clear WebSocket reference
 		} else {
+			console.log(`[DEBUG] Ignoring close event from old WebSocket for agent ${attachedAgentId} (new connection active)`);
 			console.log(`Ignoring close event from old WebSocket for agent ${attachedAgentId} (new connection active)`);
 		}
 	});

@@ -46,9 +46,15 @@ function connect() {
 	// Initialize OBS Manager
 	obsManager = new OBSManager();
 
-	ws = new WebSocket(ORCHESTRATOR_URL);
+	const currentWs = new WebSocket(ORCHESTRATOR_URL);
+	ws = currentWs; // Update module-level reference
 
-	ws.on("open", () => {
+	currentWs.on("open", () => {
+		// Only handle if this is still the active WebSocket
+		if (ws !== currentWs) {
+			console.log(`Ignoring open event from old WebSocket`);
+			return;
+		}
 		isConnecting = false; // Connection established
 		state = "IDLE";
 		const hello: WSMessage = {
@@ -66,10 +72,14 @@ function connect() {
 				auth: { token: AGENT_TOKEN },
 			},
 		};
-		ws?.send(JSON.stringify(hello));
+		currentWs.send(JSON.stringify(hello));
 	});
 
-	ws.on("message", (raw) => {
+	currentWs.on("message", (raw) => {
+		// Only handle if this is still the active WebSocket
+		if (ws !== currentWs) {
+			return;
+		}
 		let msg: WSMessage<any>;
 		try {
 			msg = JSON.parse(String(raw));
@@ -110,18 +120,19 @@ function connect() {
 		}
 	});
 
-	ws.on("close", async (code, reason) => {
-		const closedWs = ws; // Capture reference to the closed WebSocket
+	currentWs.on("close", async (code, reason) => {
+		// Only handle this close event if this WebSocket is still the active one
+		// This prevents old WebSocket close events from triggering reconnects
+		if (ws !== currentWs) {
+			console.log(`Ignoring close event from old WebSocket (new connection active)`);
+			return;
+		}
+		
 		isConnecting = false; // Connection attempt finished (failed)
 		console.log(`Connection closed. Code: ${code}, Reason: ${reason?.toString() || 'No reason'}. Reconnecting in 3s...`);
 		stopHeartbeat();
 		state = "OFFLINE";
-		
-		// Clear WebSocket reference only if this is still the current WebSocket
-		// (prevents clearing a new connection that was established during cleanup)
-		if (ws === closedWs) {
-			ws = null;
-		}
+		ws = null; // Clear WebSocket reference
 
 		// Clean up OBS processes
 		if (obsManager) {
@@ -132,15 +143,22 @@ function connect() {
 			}
 		}
 
-		// Only reconnect if we're not already connecting and this was the active connection
-		if (!isConnecting && ws === null) {
-			setTimeout(connect, 3000);
-		} else {
-			console.log(`Skipping reconnect - already connecting or new connection established`);
-		}
+		// Reconnect after delay
+		setTimeout(() => {
+			// Double-check we're still disconnected before reconnecting
+			if (!ws || ws.readyState !== WebSocket.OPEN) {
+				connect();
+			} else {
+				console.log(`Skipping reconnect - connection already established`);
+			}
+		}, 3000);
 	});
 
-	ws.on("error", (err) => {
+	currentWs.on("error", (err) => {
+		// Only handle if this is still the active WebSocket
+		if (ws !== currentWs) {
+			return;
+		}
 		isConnecting = false; // Connection attempt failed
 		console.error("WS error:", err);
 	});
