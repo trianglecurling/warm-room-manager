@@ -110,7 +110,7 @@ export class YouTubeService {
 					},
 					contentDetails: {
 						enableAutoStart: true,
-						enableAutoStop: true,
+						enableAutoStop: false,
 						enableContentEncryption: false,
 						enableDvr: true,
 						enableEmbed: true,
@@ -274,6 +274,79 @@ export class YouTubeService {
 			console.log(`Updated YouTube broadcast ${broadcastId}`);
 		} catch (error) {
 			console.error(`Failed to update broadcast ${broadcastId}:`, error);
+			throw new Error(`YouTube API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	/**
+	 * End a broadcast explicitly (required when auto-stop is disabled)
+	 */
+	async endBroadcast(broadcastId: string): Promise<void> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Mock end broadcast: ${broadcastId}`);
+			return;
+		}
+
+		if (!this.youtube) {
+			throw new Error('YouTube OAuth2 credentials not configured');
+		}
+
+		try {
+			await this.youtube.liveBroadcasts.transition({
+				part: ['status'],
+				broadcastStatus: 'complete',
+				id: broadcastId,
+			});
+			console.log(`Completed YouTube broadcast ${broadcastId}`);
+		} catch (error) {
+			console.error(`Failed to end broadcast ${broadcastId}:`, error);
+			throw new Error(`YouTube API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	/**
+	 * Get broadcast + stream status for health monitoring
+	 */
+	async getBroadcastAndStreamStatus(broadcastId: string, streamId: string): Promise<{
+		lifeCycleStatus?: string;
+		actualEndTime?: string;
+		streamStatus?: string;
+	}> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Returning mock health status for broadcast: ${broadcastId}`);
+			return {
+				lifeCycleStatus: 'live',
+				actualEndTime: undefined,
+				streamStatus: 'active',
+			};
+		}
+
+		if (!this.youtube) {
+			throw new Error('YouTube OAuth2 credentials not configured');
+		}
+
+		try {
+			const [broadcastResponse, streamResponse] = await Promise.all([
+				this.youtube.liveBroadcasts.list({
+					part: ['status'],
+					id: [broadcastId],
+				}),
+				this.youtube.liveStreams.list({
+					part: ['status'],
+					id: [streamId],
+				}),
+			]);
+
+			const broadcast = broadcastResponse.data.items?.[0];
+			const stream = streamResponse.data.items?.[0];
+
+			return {
+				lifeCycleStatus: (broadcast?.status as any)?.lifeCycleStatus,
+				actualEndTime: (broadcast?.status as any)?.actualEndTime,
+				streamStatus: (stream?.status as any)?.streamStatus,
+			};
+		} catch (error) {
+			console.error(`Failed to get broadcast/stream status for ${broadcastId}:`, error);
 			throw new Error(`YouTube API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		}
 	}

@@ -26,6 +26,8 @@ let heartbeatTimer: NodeJS.Timeout | null = null;
 let heartbeatIntervalMs = 3000;
 let obsManager: OBSManager | null = null;
 let isConnecting = false; // Prevent multiple simultaneous connection attempts
+let currentStreamConfig: { streamUrl: string; streamKey: string } | null = null;
+let isPaused = false;
 
 function connect() {
 	// Prevent multiple simultaneous connection attempts
@@ -113,6 +115,14 @@ function connect() {
 			}
 			case Msg.OrchestratorJobUnmute: {
 				onJobUnmute(msg);
+				break;
+			}
+			case Msg.OrchestratorJobPause: {
+				onJobPause(msg);
+				break;
+			}
+			case Msg.OrchestratorJobUnpause: {
+				onJobUnpause(msg);
 				break;
 			}
 			default:
@@ -211,6 +221,12 @@ async function startStreamingJob(jobId: string, config: any, streamMetadata?: St
 			throw new Error('Missing YouTube stream configuration for FFmpeg');
 		}
 
+		currentStreamConfig = {
+			streamUrl: streamMetadata.youtube.streamUrl,
+			streamKey: streamMetadata.youtube.streamKey,
+		};
+		isPaused = false;
+
 		// Determine scene name from stream key
 		let sceneName = 'SheetA'; // Default scene
 		const streamKey = config?.streamKey;
@@ -281,6 +297,8 @@ async function stopStreamingJob(jobId: string, reason?: string) {
 			await obsManager.stopFFmpegStream();
 		}
 
+		isPaused = false;
+		currentStreamConfig = null;
 		currentJobId = null;
 		state = "IDLE";
 		send(Msg.AgentJobStopped, { jobId, status: "STOPPED" as const });
@@ -369,6 +387,58 @@ async function onJobUnmute(msg: WSMessage<{ jobId: string }>) {
 	} catch (error) {
 		console.error(`Failed to unmute job ${jobId}:`, error);
 		send(Msg.AgentJobUnmute, { jobId, success: false });
+	}
+}
+
+async function onJobPause(msg: WSMessage<{ jobId: string }>) {
+	const { jobId } = msg.payload;
+	if (!currentJobId || currentJobId !== jobId) return;
+
+	try {
+		if (isPaused) {
+			send(Msg.AgentJobPaused, { jobId, success: true });
+			return;
+		}
+
+		console.log(`Pausing stream for job ${jobId}`);
+
+		if (obsManager) {
+			await obsManager.stopFFmpegStream();
+		}
+
+		isPaused = true;
+		send(Msg.AgentJobPaused, { jobId, success: true });
+	} catch (error) {
+		console.error(`Failed to pause job ${jobId}:`, error);
+		send(Msg.AgentJobPaused, { jobId, success: false });
+	}
+}
+
+async function onJobUnpause(msg: WSMessage<{ jobId: string }>) {
+	const { jobId } = msg.payload;
+	if (!currentJobId || currentJobId !== jobId) return;
+
+	try {
+		if (!isPaused) {
+			send(Msg.AgentJobUnpaused, { jobId, success: true });
+			return;
+		}
+
+		console.log(`Unpausing stream for job ${jobId}`);
+
+		if (!currentStreamConfig) {
+			throw new Error('Missing stream configuration for unpause');
+		}
+
+		if (obsManager) {
+			await obsManager.startFFmpegStream(currentStreamConfig);
+		}
+
+		isPaused = false;
+		send(Msg.AgentJobUnpaused, { jobId, success: true });
+	} catch (error) {
+		console.error(`Failed to unpause job ${jobId}:`, error);
+		send(Msg.AgentJobUnpaused, { jobId, success: false });
 	}
 }
 

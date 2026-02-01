@@ -4,6 +4,7 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
+    "check:team-lookup": "node dist/check-team-lookup.js",
     "start": "node dist/index.js",
     "dev": "nodemon --watch src --ext ts --exec tsx src/index.ts",
     "lint": "eslint . --ext .ts",

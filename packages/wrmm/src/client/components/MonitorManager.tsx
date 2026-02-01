@@ -96,6 +96,7 @@ export const MonitorManager = () => {
     name: string;
     isLive: boolean;
     muted: boolean;
+    isPaused?: boolean;
     title: string;
     description: string;
     viewers: number;
@@ -110,16 +111,30 @@ export const MonitorManager = () => {
 
   const streamOrder: StreamKey[] = ['sheetA','sheetB','sheetC','sheetD','vibe'];
   const [streams, setStreams] = useState<Record<StreamKey, StreamState>>({
-    sheetA: { key: 'sheetA', name: 'Sheet A', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    sheetB: { key: 'sheetB', name: 'Sheet B', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    sheetC: { key: 'sheetC', name: 'Sheet C', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    sheetD: { key: 'sheetD', name: 'Sheet D', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    vibe:   { key: 'vibe',   name: 'Vibe Stream', isLive: false, muted: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetA: { key: 'sheetA', name: 'Sheet A', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetB: { key: 'sheetB', name: 'Sheet B', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetC: { key: 'sheetC', name: 'Sheet C', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetD: { key: 'sheetD', name: 'Sheet D', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    vibe:   { key: 'vibe',   name: 'Vibe Stream', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
   });
   const [selectedStreams, setSelectedStreams] = useState<StreamKey[]>([]);
 
   // Use orchestrator hook for real-time data
-  const { agents: orchestratorAgents, jobs: orchestratorJobs, isConnected: orchestratorConnected } = useOrchestrator();
+  const { agents: orchestratorAgents, jobs: orchestratorJobs, restartEvents, isConnected: orchestratorConnected } = useOrchestrator();
+
+  const restartInfoByJobId = useMemo(() => {
+    const map: Record<string, { attempt: number; backoffMs?: number; ts?: string }> = {};
+    Object.values(restartEvents).forEach(event => {
+      const attempt = typeof event.data?.attempt === 'number' ? event.data.attempt : undefined;
+      if (attempt === undefined) return;
+      map[event.jobId] = {
+        attempt,
+        backoffMs: typeof event.data?.backoffMs === 'number' ? event.data.backoffMs : undefined,
+        ts: event.ts,
+      };
+    });
+    return map;
+  }, [restartEvents]);
 
   // Helper function to convert StreamKey to sheet identifier
   const getSheetIdentifier = (streamKey: StreamKey): 'A' | 'B' | 'C' | 'D' | 'vibe' => {
@@ -203,6 +218,7 @@ export const MonitorManager = () => {
             // Only show real YouTube URLs when available from metadata
             publicUrl: metadata?.publicUrl || null,
             adminUrl: metadata?.adminUrl || null,
+            isPaused: metadata?.isPaused ?? false,
             // ONLY use metadata for title/description (which gets synced to local state via useEffect)
             // Never use inlineConfig as it contains the pre-generation values
             title: updatedStreams[streamKey].title,
@@ -423,6 +439,23 @@ export const MonitorManager = () => {
       }
     } catch (error: any) {
       setError(`Failed to ${live ? 'start' : 'stop'} ${streams[key].name}: ${error.message}`);
+    }
+  };
+
+  const togglePause = async (key: StreamKey) => {
+    const stream = streamsWithJobs[key];
+    if (!stream.jobId) return;
+
+    try {
+      if (stream.isPaused) {
+        await apiClient.unpauseJob(stream.jobId);
+        setSuccess(`Unpaused ${stream.name}`);
+      } else {
+        await apiClient.pauseJob(stream.jobId);
+        setSuccess(`Paused ${stream.name}`);
+      }
+    } catch (error: any) {
+      setError(`Failed to ${stream.isPaused ? 'unpause' : 'pause'} ${streams[key].name}: ${error.message}`);
     }
   };
 
@@ -2579,6 +2612,12 @@ export const MonitorManager = () => {
                   : effectiveSelectedStreams().includes(key);
                 const isRunning = s.isLive;
                 const isDisabled = isRunning || (key === 'vibe' && selectedStreams.filter(k => k !== 'vibe').length >= 2); // Vibe is disabled when auto-selected
+                const restartInfo = s.jobId ? restartInfoByJobId[s.jobId] : undefined;
+                const showRestart = Boolean(
+                  restartInfo &&
+                  s.jobStatus &&
+                  !['STOPPED', 'FAILED', 'DISMISSED', 'CANCELED'].includes(s.jobStatus)
+                );
                 return (
                   <div key={key} className={`bg-white rounded-lg shadow p-4 ${selected ? 'ring-2 ring-blue-500' : ''}`}>
                     <div className="flex items-start justify-between">
@@ -2587,9 +2626,20 @@ export const MonitorManager = () => {
                         <div className="flex items-center gap-2 mt-1">
                           <span className={`inline-block w-2.5 h-2.5 rounded-full ${s.isLive ? 'bg-red-500' : s.error ? 'bg-red-500' : 'bg-gray-300'}`} title={s.isLive ? 'Live' : s.error ? 'Error' : 'Offline'}></span>
                           <span className="text-sm text-gray-600">{s.isLive ? 'LIVE' : s.error ? 'ERROR' : 'OFFLINE'}</span>
+                          {s.isPaused && s.isLive && (
+                            <>
+                              <span className="text-gray-300">•</span>
+                              <span className="text-xs font-medium text-amber-700">Paused</span>
+                            </>
+                          )}
                           <span className="text-gray-300">•</span>
                           <span className="text-sm text-gray-600">Viewers: {s.viewers}</span>
                         </div>
+                        {showRestart && restartInfo && (
+                          <div className="mt-1 text-xs text-amber-700">
+                            Restart attempt {restartInfo.attempt}/3{restartInfo.backoffMs ? ` (backoff ${Math.round(restartInfo.backoffMs / 1000)}s)` : ''}
+                          </div>
+                        )}
                         {s.error && (
                           <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-800 relative">
                             <button
@@ -2619,6 +2669,14 @@ export const MonitorManager = () => {
                           disabled={!orchestratorConnected}
                         >
                           {orchestratorConnected ? (s.isLive ? 'Stop' : 'Start') : 'Offline'}
+                        </button>
+                        <button
+                          className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"
+                          onClick={() => togglePause(key)}
+                          disabled={!orchestratorConnected || !s.jobId || s.jobStatus !== 'RUNNING'}
+                          title={!s.jobId ? 'No active job' : s.jobStatus !== 'RUNNING' ? 'Pause available when running' : s.isPaused ? 'Resume stream' : 'Pause stream'}
+                        >
+                          {s.isPaused ? 'Unpause' : 'Pause'}
                         </button>
                         <button
                           className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"
@@ -2711,6 +2769,35 @@ export const MonitorManager = () => {
                   )}
                 </div>
               </div>
+              {agents.length > 0 && (
+                <div className="mb-3">
+                  <button
+                    onClick={async () => {
+                      const agentCount = agents.length;
+                      if (!confirm(`Are you sure you want to reboot all ${agentCount} agent(s)? This will restart all agent machines.`)) {
+                        return;
+                      }
+                      try {
+                        const result = await apiClient.rebootAllAgents('Reboot all agents requested from UI');
+                        const successCount = result.results.filter(r => r.success).length;
+                        const failureCount = result.results.filter(r => !r.success).length;
+                        if (failureCount === 0) {
+                          setSuccess(`Reboot commands sent to all ${successCount} agent(s)`);
+                        } else {
+                          setError(`Reboot sent to ${successCount} agent(s), ${failureCount} failed. Check logs for details.`);
+                        }
+                      } catch (error: any) {
+                        setError(`Failed to reboot all agents: ${error.message}`);
+                      }
+                    }}
+                    className="text-sm px-3 py-1.5 rounded bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                    disabled={!orchestratorConnected || agents.length === 0}
+                    title={orchestratorConnected ? `Reboot all ${agents.length} agent(s) via SSH` : 'Orchestrator offline'}
+                  >
+                    🔄 Restart All Agents
+                  </button>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                 {agents.map((a, idx) => {
                   const orchestratorAgent = orchestratorAgents.find(oa => oa.id === a.id);

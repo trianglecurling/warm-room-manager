@@ -143,6 +143,7 @@ export interface StreamMetadata {
   publicUrl?: string;
   adminUrl?: string;
   isMuted?: boolean;
+  isPaused?: boolean;
   streamId?: string;
   platform?: string; // e.g., "youtube", "twitch", etc.
 }
@@ -195,6 +196,14 @@ export interface WebSocketMessage {
   type: string;
   payload: any;
   timestamp?: string;
+}
+
+export interface OrchestratorJobEvent {
+  jobId: string;
+  type: string;
+  message: string;
+  data?: Record<string, unknown>;
+  ts?: string;
 }
 
 // OAuth types
@@ -533,6 +542,21 @@ class ApiClient {
     return res.json();
   }
 
+  async rebootAllAgents(reason?: string): Promise<{ ok: boolean; message: string; results: Array<{ success: boolean; agentId: string; agentName: string; host: string; error?: string }> }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/agents/reboot-all`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      const errorData = await res.json().catch(() => ({ error: errorText }));
+      throw new Error(errorData.error || errorData.message || `Failed to reboot all agents: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
   async updateAgentMeta(agentId: string, meta: Record<string, unknown>): Promise<{ ok: boolean; agent: OrchestratorAgent }> {
     const url = `${ORCHESTRATOR_BASE_URL}/v1/agents/${agentId}/meta`;
     const res = await fetch(url, {
@@ -586,6 +610,27 @@ class ApiClient {
     if (!res.ok) {
       const errorText = await res.text().catch(() => '');
       throw new Error(errorText || `Failed to unmute job: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  // Pause control
+  async pauseJob(jobId: string): Promise<{ ok: boolean; job: OrchestratorJob }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/jobs/${jobId}/pause`;
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to pause job: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async unpauseJob(jobId: string): Promise<{ ok: boolean; job: OrchestratorJob }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/jobs/${jobId}/unpause`;
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to unpause job: ${res.status} ${res.statusText}`);
     }
     return res.json();
   }

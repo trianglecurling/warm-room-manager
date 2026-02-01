@@ -61,6 +61,7 @@ export interface StreamMetadata {
 	publicUrl?: string;
 	adminUrl?: string;
 	isMuted?: boolean;
+	isPaused?: boolean;
 	streamId?: string;
 	platform?: string; // e.g., "youtube", "twitch", etc.
 	youtube?: YouTubeMetadata;
@@ -103,6 +104,8 @@ export const Msg = {
 	AgentError: "agent.error",
 	AgentJobMute: "agent.job.mute",
 	AgentJobUnmute: "agent.job.unmute",
+	AgentJobPaused: "agent.job.paused",
+	AgentJobUnpaused: "agent.job.unpaused",
 	AgentRebootAck: "agent.reboot.ack",
 
 	OrchestratorHelloOk: "orchestrator.hello.ok",
@@ -111,6 +114,8 @@ export const Msg = {
 	OrchestratorJobKill: "orchestrator.job.kill",
 	OrchestratorJobMute: "orchestrator.job.mute",
 	OrchestratorJobUnmute: "orchestrator.job.unmute",
+	OrchestratorJobPause: "orchestrator.job.pause",
+	OrchestratorJobUnpause: "orchestrator.job.unpause",
 	OrchestratorReboot: "orchestrator.reboot",
 
 	UIAgentUpdate: "ui.agent.update",

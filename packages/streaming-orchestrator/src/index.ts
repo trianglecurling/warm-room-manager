@@ -22,6 +22,9 @@ const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS ?? 3000);
 const HEARTBEAT_TIMEOUT_MS = Number(process.env.HEARTBEAT_TIMEOUT_MS ?? 10000);
 const STOP_GRACE_MS = Number(process.env.STOP_GRACE_MS ?? 10000);
 const KILL_AFTER_MS = Number(process.env.KILL_AFTER_MS ?? 5000);
+const STREAM_HEALTH_INTERVAL_MS = Number(process.env.STREAM_HEALTH_INTERVAL_MS ?? 15000);
+const STREAM_INACTIVE_GRACE_MS = Number(process.env.STREAM_INACTIVE_GRACE_MS ?? 30000);
+const STREAM_RESTART_BACKOFFS_MS = [5000, 15000, 45000];
 
 // Security: Enable IP-based access control to restrict public access
 // Set to true in production to only allow /status and /status-ws from external IPs
@@ -141,6 +144,8 @@ type TeamNamesStore = {
 const agents = new Map<string, AgentNode>();
 const jobs = new Map<string, Job>();
 const pendingByIdem = new Map<string, string>(); // idemKey -> jobId
+const streamHealth = new Map<string, { firstInactiveAt?: number; nextRestartAt?: number; attempts: number }>();
+const pendingRestarts = new Set<string>();
 const teamNames: TeamNamesStore = {
 	A: { red: '', yellow: '' },
 	B: { red: '', yellow: '' },
@@ -364,6 +369,63 @@ function updateJob(id: string, patch: Partial<Job>) {
 	jobs.set(id, j);
 	broadcastUI(Msg.UIJobUpdate, j);
 	broadcastStatus(); // Broadcast status update to public clients
+}
+
+function emitJobEvent(jobId: string, type: string, message: string, data?: Record<string, unknown>) {
+	broadcastUI(Msg.UIJobEvent, {
+		jobId,
+		type,
+		message,
+		data,
+		ts: new Date().toISOString(),
+	});
+}
+
+async function endBroadcastForJob(job: Job, reason: string) {
+	const broadcastId = job.streamMetadata?.youtube?.broadcastId;
+	if (!broadcastId) return;
+	try {
+		await youtubeService.endBroadcast(broadcastId);
+		console.log(`✅ Ended YouTube broadcast for job ${job.id}. Reason: ${reason}`);
+		emitJobEvent(job.id, "broadcast.completed", "YouTube broadcast completed", { reason, broadcastId });
+	} catch (error) {
+		console.error(`❌ Failed to end YouTube broadcast for job ${job.id}:`, error);
+		emitJobEvent(job.id, "broadcast.complete_failed", "Failed to complete YouTube broadcast", {
+			reason,
+			broadcastId,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+async function queueStreamRestart(job: Job, reason: string, details?: Record<string, unknown>) {
+	if (pendingRestarts.has(job.id)) return;
+	pendingRestarts.add(job.id);
+
+	const agent = job.agentId ? agents.get(job.agentId) : null;
+	if (!agent || agent.state === "OFFLINE" || !agent.ws) {
+		updateJob(job.id, {
+			status: "PENDING",
+			agentId: null,
+			startedAt: null,
+			endedAt: null,
+			error: null,
+			streamMetadata: { ...job.streamMetadata, isPaused: false },
+		});
+		pendingRestarts.delete(job.id);
+		emitJobEvent(job.id, "stream.restart_queued", "Stream restart queued (agent unavailable)", { reason, ...details });
+		return;
+	}
+
+	const msg: WSMessage = {
+		type: Msg.OrchestratorJobStop,
+		msgId: randomUUID(),
+		ts: new Date().toISOString(),
+		payload: { jobId: job.id, reason, deadlineMs: STOP_GRACE_MS },
+	};
+	agent.ws.send(JSON.stringify(msg));
+	updateJob(job.id, { status: "STOPPING" });
+	emitJobEvent(job.id, "stream.restart_requested", "Stream restart requested", { reason, ...details });
 }
 
 function toPublicAgent(a: AgentNode): AgentInfo {
@@ -1245,16 +1307,8 @@ app.put<{
 	return { ok: true, agent: toPublicAgent(a) };
 });
 
-app.post<{
-	Params: { id: string };
-	Body: { reason?: string };
-}>("/v1/agents/:id/reboot", async (req, reply) => {
-	const agentId = req.params.id;
-	const a = agents.get(agentId);
-	if (!a) return reply.code(404).send({ error: "Agent not found" });
-
-	const reason = req.body.reason || 'Reboot requested from UI';
-	
+// Helper function to reboot a single agent via SSH
+async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ success: boolean; agentId: string; agentName: string; host: string; error?: string }> {
 	// Get SSH configuration from environment variables
 	const sshUser = process.env.AGENT_SSH_USER || 'Administrator';
 	const sshKeyPath = process.env.AGENT_KEY_PATH;
@@ -1262,16 +1316,19 @@ app.post<{
 	
 	// Get SSH host from agent's remote address (stored when WebSocket connects)
 	// Fallback to AGENT_SSH_HOST env var or agent name
-	const sshHost = a.remoteAddress || process.env.AGENT_SSH_HOST || a.name;
+	const sshHost = agent.remoteAddress || process.env.AGENT_SSH_HOST || agent.name;
 	
 	if (!sshHost) {
-		return reply.code(400).send({ 
-			error: "SSH host not found",
-			message: "Cannot determine SSH host. Ensure agent is connected or set AGENT_SSH_HOST environment variable."
-		});
+		return {
+			success: false,
+			agentId: agent.id,
+			agentName: agent.name,
+			host: '',
+			error: "Cannot determine SSH host. Ensure agent is connected or set AGENT_SSH_HOST environment variable."
+		};
 	}
 
-	console.log(`🔄 Attempting SSH reboot for agent ${agentId} (${a.name}) at ${sshHost}`);
+	console.log(`🔄 Attempting SSH reboot for agent ${agent.id} (${agent.name}) at ${sshHost}`);
 
 	try {
 		// Normalize key path for Windows
@@ -1319,26 +1376,102 @@ app.post<{
 		execAsync(sshCommand).catch((error) => {
 			// It's normal for SSH to fail when the machine reboots, but log other errors
 			if (error.message && !error.message.includes('Connection closed') && !error.message.includes('closed by remote host')) {
-				console.error(`SSH command error:`, error.message);
+				console.error(`SSH command error for agent ${agent.name}:`, error.message);
 				console.error(`Full error:`, error);
 			} else {
-				console.log(`SSH command executed (connection closed due to reboot)`);
+				console.log(`SSH command executed for agent ${agent.name} (connection closed due to reboot)`);
 			}
 		});
 
-		return reply.code(202).send({ 
-			ok: true, 
-			message: 'Reboot command sent via SSH',
-			method: 'ssh',
+		return {
+			success: true,
+			agentId: agent.id,
+			agentName: agent.name,
 			host: sshHost
-		});
+		};
 	} catch (error) {
-		console.error(`Failed to reboot agent via SSH:`, error);
+		console.error(`Failed to reboot agent ${agent.name} via SSH:`, error);
+		return {
+			success: false,
+			agentId: agent.id,
+			agentName: agent.name,
+			host: sshHost,
+			error: error instanceof Error ? error.message : 'Unknown error'
+		};
+	}
+}
+
+app.post<{
+	Params: { id: string };
+	Body: { reason?: string };
+}>("/v1/agents/:id/reboot", async (req, reply) => {
+	const agentId = req.params.id;
+	const a = agents.get(agentId);
+	if (!a) return reply.code(404).send({ error: "Agent not found" });
+
+	const reason = req.body.reason || 'Reboot requested from UI';
+	const result = await rebootAgentViaSSH(a, reason);
+
+	if (!result.success) {
 		return reply.code(500).send({ 
 			error: "Failed to execute SSH reboot",
-			message: error instanceof Error ? error.message : 'Unknown error'
+			message: result.error || 'Unknown error'
 		});
 	}
+
+	return reply.code(202).send({ 
+		ok: true, 
+		message: 'Reboot command sent via SSH',
+		method: 'ssh',
+		host: result.host
+	});
+});
+
+app.post<{
+	Body: { reason?: string };
+}>("/v1/agents/reboot-all", async (req, reply) => {
+	const reason = req.body.reason || 'Reboot all agents requested from UI';
+	const agentList = Array.from(agents.values());
+	
+	if (agentList.length === 0) {
+		return reply.code(200).send({
+			ok: true,
+			message: 'No agents to reboot',
+			results: []
+		});
+	}
+
+	console.log(`🔄 Attempting to reboot all ${agentList.length} agents`);
+
+	// Reboot all agents in parallel (don't wait for completion)
+	const results = await Promise.allSettled(
+		agentList.map(agent => rebootAgentViaSSH(agent, reason))
+	);
+
+	const rebootResults = results.map((result, idx) => {
+		if (result.status === 'fulfilled') {
+			return result.value;
+		} else {
+			return {
+				success: false,
+				agentId: agentList[idx].id,
+				agentName: agentList[idx].name,
+				host: agentList[idx].remoteAddress || agentList[idx].name || 'unknown',
+				error: result.reason?.message || 'Unknown error'
+			};
+		}
+	});
+
+	const successCount = rebootResults.filter(r => r.success).length;
+	const failureCount = rebootResults.filter(r => !r.success).length;
+
+	console.log(`✅ Reboot initiated for ${successCount} agents, ${failureCount} failed`);
+
+	return reply.code(202).send({
+		ok: true,
+		message: `Reboot commands sent to ${successCount} agent(s), ${failureCount} failed`,
+		results: rebootResults
+	});
 });
 
 // Jobs REST
@@ -1534,6 +1667,9 @@ app.post<{ Params: { id: string } }>("/v1/jobs/:id/stop", async (req, reply) => 
 	if (!job) return reply.code(404).send({ error: "Not Found" });
 	if (!job.agentId) {
 		updateJob(job.id, { status: "CANCELED", endedAt: new Date().toISOString() });
+		streamHealth.delete(job.id);
+		pendingRestarts.delete(job.id);
+		void endBroadcastForJob(job, "job canceled without agent");
 		return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
 	}
 	const agent = agents.get(job.agentId);
@@ -1557,6 +1693,9 @@ app.post<{ Params: { id: string } }>("/v1/jobs/:id/dismiss", async (req, reply) 
 	if (!job) return reply.code(404).send({ error: "Not Found" });
 
 	updateJob(job.id, { status: "DISMISSED", endedAt: new Date().toISOString() });
+	streamHealth.delete(job.id);
+	pendingRestarts.delete(job.id);
+	void endBroadcastForJob(job, "job dismissed");
 	console.log(`Job ${job.id} dismissed by user`);
 	return reply.code(200).send({ ok: true, job: jobs.get(job.id) });
 });
@@ -1680,6 +1819,55 @@ app.post<{ Params: { id: string } }>("/v1/jobs/:id/unmute", async (req, reply) =
 	// Update local metadata
 	const updatedMetadata = { ...job.streamMetadata, isMuted: false };
 	updateJob(job.id, { streamMetadata: updatedMetadata });
+
+	return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
+});
+
+// Pause control endpoints (stop sending packets, keep broadcast alive)
+app.post<{ Params: { id: string } }>("/v1/jobs/:id/pause", async (req, reply) => {
+	const job = jobs.get(req.params.id);
+	if (!job) return reply.code(404).send({ error: "Not Found" });
+
+	const agent = agents.get(job.agentId!);
+	if (!agent || agent.state === "OFFLINE" || !agent.ws) {
+		return reply.code(409).send({ error: "Agent not available" });
+	}
+
+	const msg: WSMessage = {
+		type: Msg.OrchestratorJobPause,
+		msgId: randomUUID(),
+		ts: new Date().toISOString(),
+		payload: { jobId: job.id },
+	};
+	agent.ws.send(JSON.stringify(msg));
+
+	const updatedMetadata = { ...job.streamMetadata, isPaused: true };
+	updateJob(job.id, { streamMetadata: updatedMetadata });
+	emitJobEvent(job.id, "stream.pause_requested", "Pause requested");
+
+	return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
+});
+
+app.post<{ Params: { id: string } }>("/v1/jobs/:id/unpause", async (req, reply) => {
+	const job = jobs.get(req.params.id);
+	if (!job) return reply.code(404).send({ error: "Not Found" });
+
+	const agent = agents.get(job.agentId!);
+	if (!agent || agent.state === "OFFLINE" || !agent.ws) {
+		return reply.code(409).send({ error: "Agent not available" });
+	}
+
+	const msg: WSMessage = {
+		type: Msg.OrchestratorJobUnpause,
+		msgId: randomUUID(),
+		ts: new Date().toISOString(),
+		payload: { jobId: job.id },
+	};
+	agent.ws.send(JSON.stringify(msg));
+
+	const updatedMetadata = { ...job.streamMetadata, isPaused: false };
+	updateJob(job.id, { streamMetadata: updatedMetadata });
+	emitJobEvent(job.id, "stream.unpause_requested", "Unpause requested");
 
 	return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
 });
@@ -2065,6 +2253,7 @@ wssAgents.on("connection", (ws, req) => {
 								endedAt: new Date().toISOString(),
 								error: { code: "AGENT_OFFLINE", message: "Agent offline" },
 							});
+							void endBroadcastForJob(jj, "agent offline");
 						}
 					}, HEARTBEAT_TIMEOUT_MS);
 				}
@@ -2115,26 +2304,58 @@ wssAgents.on("connection", (ws, req) => {
 				};
 				const j = jobs.get(jobId);
 				if (j) {
-					// Clear title and description when stream stops so they can be auto-generated next time
-					const clearedMetadata = j.streamMetadata ? {
-						...j.streamMetadata,
-						title: '',
-						description: '',
-					} : undefined;
+					if (j.status === "FAILED" && j.error?.code === "STREAM_RESTART_EXCEEDED") {
+						updateJob(jobId, { endedAt: new Date().toISOString() });
+						void endBroadcastForJob(j, "restart attempts exhausted");
+						emitJobEvent(jobId, "stream.restart_exhausted_stop", "Stream stopped after restart exhaustion");
+						streamHealth.delete(jobId);
+						pendingRestarts.delete(jobId);
+						break;
+					}
 
-					updateJob(jobId, {
-						status,
-						endedAt: new Date().toISOString(),
-						error: error ?? null,
-						streamMetadata: clearedMetadata,
-					});
+					if (pendingRestarts.has(jobId)) {
+						pendingRestarts.delete(jobId);
+						updateJob(jobId, {
+							status: "PENDING",
+							agentId: null,
+							startedAt: null,
+							endedAt: null,
+							error: null,
+							streamMetadata: { ...j.streamMetadata, isPaused: false },
+						});
+						const health = streamHealth.get(jobId);
+						if (health) {
+							health.firstInactiveAt = undefined;
+							health.nextRestartAt = undefined;
+							streamHealth.set(jobId, health);
+						}
+						emitJobEvent(jobId, "stream.restart_ready", "Stream restart queued");
+					} else {
+						// Clear title and description when stream stops so they can be auto-generated next time
+						const clearedMetadata = j.streamMetadata ? {
+							...j.streamMetadata,
+							title: '',
+							description: '',
+						} : undefined;
 
-					// Cancel any pending YouTube updates for this job
-					const pending = pendingYouTubeUpdates.get(jobId);
-					if (pending) {
-						clearTimeout(pending.timer);
-						pendingYouTubeUpdates.delete(jobId);
-						console.log(`Cancelled pending YouTube update for stopped job ${jobId}`);
+						updateJob(jobId, {
+							status,
+							endedAt: new Date().toISOString(),
+							error: error ?? null,
+							streamMetadata: clearedMetadata,
+						});
+						void endBroadcastForJob(j, "job stopped");
+						emitJobEvent(jobId, "stream.stopped", "Stream stopped", { status, error });
+						streamHealth.delete(jobId);
+						pendingRestarts.delete(jobId);
+
+						// Cancel any pending YouTube updates for this job
+						const pending = pendingYouTubeUpdates.get(jobId);
+						if (pending) {
+							clearTimeout(pending.timer);
+							pendingYouTubeUpdates.delete(jobId);
+							console.log(`Cancelled pending YouTube update for stopped job ${jobId}`);
+						}
 					}
 				}
 				if (agent.currentJobId === jobId) {
@@ -2169,6 +2390,32 @@ wssAgents.on("connection", (ws, req) => {
 				if (j) {
 					const updatedMetadata = { ...j.streamMetadata, isMuted: !success };
 					updateJob(jobId, { streamMetadata: updatedMetadata });
+				}
+				break;
+			}
+			case Msg.AgentJobPaused: {
+				const { jobId, success } = msg.payload as {
+					jobId: string;
+					success: boolean;
+				};
+				const j = jobs.get(jobId);
+				if (j) {
+					const updatedMetadata = { ...j.streamMetadata, isPaused: success };
+					updateJob(jobId, { streamMetadata: updatedMetadata });
+					emitJobEvent(jobId, success ? "stream.paused" : "stream.pause_failed", success ? "Stream paused" : "Stream pause failed");
+				}
+				break;
+			}
+			case Msg.AgentJobUnpaused: {
+				const { jobId, success } = msg.payload as {
+					jobId: string;
+					success: boolean;
+				};
+				const j = jobs.get(jobId);
+				if (j) {
+					const updatedMetadata = { ...j.streamMetadata, isPaused: !success };
+					updateJob(jobId, { streamMetadata: updatedMetadata });
+					emitJobEvent(jobId, success ? "stream.unpaused" : "stream.unpause_failed", success ? "Stream unpaused" : "Stream unpause failed");
 				}
 				break;
 			}
@@ -2209,6 +2456,7 @@ wssAgents.on("connection", (ws, req) => {
  * Scheduler
  */
 let scheduling = false;
+let monitoring = false;
 
 async function sendAssignAndAwaitAck(agent: AgentNode, job: Job, ttlMs = 5000): Promise<boolean> {
 	if (!agent.ws) return false;
@@ -2276,6 +2524,99 @@ async function schedule() {
 	}
 }
 
+async function monitorStreamHealth() {
+	if (monitoring) return;
+	monitoring = true;
+	try {
+		const now = Date.now();
+		const candidates = Array.from(jobs.values()).filter((j) => j.status === "RUNNING");
+
+		for (const job of candidates) {
+			const youtube = job.streamMetadata?.youtube;
+			if (!youtube?.broadcastId || !youtube?.streamId) continue;
+			if (job.streamMetadata?.isPaused) continue;
+			if (pendingRestarts.has(job.id)) continue;
+
+			let status;
+			try {
+				status = await youtubeService.getBroadcastAndStreamStatus(youtube.broadcastId, youtube.streamId);
+			} catch (error) {
+				console.error(`Stream health check failed for job ${job.id}:`, error);
+				continue;
+			}
+
+			const lifeCycleStatus = status.lifeCycleStatus;
+			const streamStatus = status.streamStatus;
+			const ended = !!status.actualEndTime || lifeCycleStatus === "complete";
+			const inactive = streamStatus && streamStatus !== "active";
+
+			const health = streamHealth.get(job.id) ?? { attempts: 0 };
+			if (!ended && !inactive) {
+				health.firstInactiveAt = undefined;
+				health.nextRestartAt = undefined;
+				streamHealth.set(job.id, health);
+				continue;
+			}
+
+			if (!health.firstInactiveAt) {
+				health.firstInactiveAt = now;
+				streamHealth.set(job.id, health);
+				continue;
+			}
+
+			if (now - health.firstInactiveAt < STREAM_INACTIVE_GRACE_MS) {
+				streamHealth.set(job.id, health);
+				continue;
+			}
+
+			if (health.attempts >= STREAM_RESTART_BACKOFFS_MS.length) {
+				const agent = job.agentId ? agents.get(job.agentId) : null;
+				if (agent?.ws) {
+					const msg: WSMessage = {
+						type: Msg.OrchestratorJobStop,
+						msgId: randomUUID(),
+						ts: new Date().toISOString(),
+						payload: { jobId: job.id, reason: "restart attempts exhausted", deadlineMs: STOP_GRACE_MS },
+					};
+					agent.ws.send(JSON.stringify(msg));
+				}
+
+				updateJob(job.id, {
+					status: "FAILED",
+					endedAt: new Date().toISOString(),
+					error: { code: "STREAM_RESTART_EXCEEDED", message: "Stream restart attempts exhausted" },
+				});
+				void endBroadcastForJob(job, "restart attempts exhausted");
+				emitJobEvent(job.id, "stream.restart_exhausted", "Stream restart attempts exhausted", {
+					lifeCycleStatus,
+					streamStatus,
+				});
+				streamHealth.delete(job.id);
+				continue;
+			}
+
+			if (health.nextRestartAt && now < health.nextRestartAt) {
+				streamHealth.set(job.id, health);
+				continue;
+			}
+
+			health.attempts += 1;
+			const backoffMs = STREAM_RESTART_BACKOFFS_MS[health.attempts - 1];
+			health.nextRestartAt = now + backoffMs;
+			streamHealth.set(job.id, health);
+
+			await queueStreamRestart(job, "stream monitor restart", {
+				attempt: health.attempts,
+				backoffMs,
+				lifeCycleStatus,
+				streamStatus,
+			});
+		}
+	} finally {
+		monitoring = false;
+	}
+}
+
 // Stream title and description generation functions
 function generateStreamTitle(context: StreamContext): string {
 	const parts: string[] = [];
@@ -2335,6 +2676,10 @@ function generateStreamDescription(context: StreamContext): string {
 setInterval(() => {
 	void schedule();
 }, 500);
+
+setInterval(() => {
+	void monitorStreamHealth();
+}, STREAM_HEALTH_INTERVAL_MS);
 
 /**
  * Start server

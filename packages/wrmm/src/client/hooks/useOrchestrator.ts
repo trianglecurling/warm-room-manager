@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { apiClient, OrchestratorAgent, OrchestratorJob, WebSocketMessage } from '../lib/api';
+import { apiClient, OrchestratorAgent, OrchestratorJob, OrchestratorJobEvent, WebSocketMessage } from '../lib/api';
 
 interface UseOrchestratorOptions {
   autoConnect?: boolean;
@@ -9,6 +9,7 @@ interface UseOrchestratorOptions {
 interface UseOrchestratorReturn {
   agents: OrchestratorAgent[];
   jobs: OrchestratorJob[];
+  restartEvents: Record<string, OrchestratorJobEvent>;
   isConnected: boolean;
   error: string | null;
   connect: () => void;
@@ -21,6 +22,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}): UseOrches
 
   const [agents, setAgents] = useState<OrchestratorAgent[]>([]);
   const [jobs, setJobs] = useState<OrchestratorJob[]>([]);
+  const [restartEvents, setRestartEvents] = useState<Record<string, OrchestratorJobEvent>>({});
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -160,6 +162,14 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}): UseOrches
       case 'ui.job.update':
         setJobs(prev => {
           const existingIndex = prev.findIndex(job => job.id === message.payload.id);
+          const shouldClearRestart = ['RUNNING', 'STOPPED', 'FAILED', 'DISMISSED', 'CANCELED'].includes(message.payload.status);
+          if (shouldClearRestart) {
+            setRestartEvents(prevEvents => {
+              if (!prevEvents[message.payload.id]) return prevEvents;
+              const { [message.payload.id]: _removed, ...rest } = prevEvents;
+              return rest;
+            });
+          }
           if (existingIndex >= 0) {
             // Update existing job
             const updated = [...prev];
@@ -201,6 +211,15 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}): UseOrches
           }
         });
         break;
+      case 'ui.job.event': {
+        const event = message.payload as OrchestratorJobEvent;
+        const isRestartEvent = event.type === 'stream.restart_requested' || event.type === 'stream.restart_ready';
+        const attempt = typeof event.data?.attempt === 'number' ? event.data.attempt : undefined;
+        if (isRestartEvent && attempt !== undefined) {
+          setRestartEvents(prevEvents => ({ ...prevEvents, [event.jobId]: event }));
+        }
+        break;
+      }
 
       default:
         console.log('Unhandled WebSocket message type:', message.type);
@@ -247,6 +266,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}): UseOrches
   return {
     agents,
     jobs,
+    restartEvents,
     isConnected,
     error,
     connect,

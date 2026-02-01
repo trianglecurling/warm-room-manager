@@ -1,6 +1,7 @@
 // src/ccm-scraper.ts
 import { chromium, Browser, Page, BrowserContext } from "playwright"; // Import BrowserContext
 import { Team, Game, Name } from "./types.js";
+import { cleanTeamName, normalizeKeyPart, stripTrailingParenthetical } from "./team-name-utils.js";
 import dotenv from "dotenv";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -19,12 +20,6 @@ export const SHEET_NAMES = (process.env.SHEET_NAMES || "A,B,C,D").split(",").map
 const MAX_CONCURRENT_PAGES = parseInt(process.env.MAX_CONCURRENCY || "5", 10); // Max number of Playwright pages to open simultaneously
 
 // --- Helper Functions ---
-
-function cleanTeamName(name: string): string {
-  // Regex to match content in parentheses and the parentheses themselves
-  // \s*\([^)]*\)\s* matches optional whitespace, opening parenthesis, any characters inside, closing parenthesis, optional whitespace
-  return name.replace(/\s*\([^)]*\)\s*/g, '').trim();
-}
 
 /**
  * Ensures the screenshots directory exists.
@@ -334,9 +329,26 @@ export async function getAllGames(allTeams: Team[]): Promise<Game[]> {
   const allGames: Game[] = [];
   // CHANGE: Map team by composite key: "league::teamName"
   const teamsMap = new Map<string, Team>();
-  allTeams.forEach((team) =>
-    teamsMap.set(`${team.league.toLowerCase()}::${team.name.toLowerCase()}`, team),
-  );
+  allTeams.forEach((team) => {
+    const leagueKey = normalizeKeyPart(team.league);
+    const exactNameKey = normalizeKeyPart(cleanTeamName(team.name));
+    teamsMap.set(`${leagueKey}::${exactNameKey}`, team);
+  });
+
+  const lookupTeamForLeague = (leagueName: string, scrapedTeamName: string): Team | undefined => {
+    const leagueKey = normalizeKeyPart(leagueName);
+    const exact = cleanTeamName(scrapedTeamName);
+    const exactKey = `${leagueKey}::${normalizeKeyPart(exact)}`;
+    const exactHit = teamsMap.get(exactKey);
+    if (exactHit) return exactHit;
+
+    const stripped = stripTrailingParenthetical(scrapedTeamName);
+    if (stripped && stripped !== scrapedTeamName) {
+      const strippedKey = `${leagueKey}::${normalizeKeyPart(stripped)}`;
+      return teamsMap.get(strippedKey);
+    }
+    return undefined;
+  };
 
   // 1. Get all league IDs (re-using logic from getAllTeams for consistency)
   if (!initialNavigationPage) throw new Error("Initial navigation page not initialized for game scraping.");
@@ -392,19 +404,15 @@ export async function getAllGames(allTeams: Team[]): Promise<Game[]> {
 
         const gamesForLeague: Game[] = [];
         for (const scrapedGame of scrapedGamesData) {
-          // Apply cleanTeamName function here after splitting
           const [rawTeam1Name, rawTeam2Name] = scrapedGame.teamNames
             .split(" VS. ")
             .map((name) => name.trim());
 
-          const team1Name = cleanTeamName(rawTeam1Name); // Apply cleaning
-          const team2Name = cleanTeamName(rawTeam2Name); // Apply cleaning
+          const team1Name = cleanTeamName(rawTeam1Name || "");
+          const team2Name = cleanTeamName(rawTeam2Name || "");
 
-          const team1LookupKey = `${currentLeagueName.toLowerCase()}::${team1Name.toLowerCase()}`;
-          const team2LookupKey = `${currentLeagueName.toLowerCase()}::${team2Name.toLowerCase()}`;
-
-          const team1 = teamsMap.get(team1LookupKey);
-          const team2 = teamsMap.get(team2LookupKey);
+          const team1 = lookupTeamForLeague(currentLeagueName, rawTeam1Name || "");
+          const team2 = lookupTeamForLeague(currentLeagueName, rawTeam2Name || "");
 
           if (team1 && team2) {
             // Also, double-check the invariant check logic. The `game.league` field needs to be established.
@@ -417,7 +425,12 @@ export async function getAllGames(allTeams: Team[]): Promise<Game[]> {
               team2: team2,
             });
           } else {
-            if (team1Name !== "NOT SET" && team2Name !== "NOT SET") {
+            const shouldWarn =
+              Boolean(team1Name) &&
+              Boolean(team2Name) &&
+              team1Name.toUpperCase() !== "NOT SET" &&
+              team2Name.toUpperCase() !== "NOT SET";
+            if (shouldWarn) {
               console.warn(
                 `Scraping: Could not find teams for game "${scrapedGame.teamNames}" in league "${currentLeagueName}". Skipping game. Team1 Found: ${!!team1}, Team2 Found: ${!!team2}`,
               );
