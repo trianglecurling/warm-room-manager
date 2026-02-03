@@ -13,6 +13,7 @@ export const StreamStartCountdownModal: React.FC<StreamStartCountdownModalProps>
 }) => {
   const [countdown, setCountdown] = useState(10);
   const hasConfirmedRef = useRef(false);
+  const onConfirmRef = useRef(onConfirm);
 
   // Reset confirmation flag when component mounts
   useEffect(() => {
@@ -20,23 +21,26 @@ export const StreamStartCountdownModal: React.FC<StreamStartCountdownModalProps>
   }, []);
 
   useEffect(() => {
-    if (countdown <= 0) {
-      if (!hasConfirmedRef.current) {
-        hasConfirmedRef.current = true;
-        console.log('🎯 CountdownModal: Calling onConfirm (countdown reached 0)');
-        onConfirm();
-      } else {
-        console.log('🎯 CountdownModal: Skipping duplicate onConfirm call');
-      }
-      return;
-    }
+    onConfirmRef.current = onConfirm;
+  }, [onConfirm]);
 
-    const timer = setTimeout(() => {
-      setCountdown(countdown - 1);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          if (!hasConfirmedRef.current) {
+            hasConfirmedRef.current = true;
+            console.log('🎯 CountdownModal: Calling onConfirm (countdown reached 0)');
+            onConfirmRef.current();
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
     }, 1000);
 
-    return () => clearTimeout(timer);
-  }, [countdown, onConfirm]);
+    return () => clearInterval(timer);
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {

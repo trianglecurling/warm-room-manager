@@ -144,8 +144,54 @@ export interface StreamMetadata {
   adminUrl?: string;
   isMuted?: boolean;
   isPaused?: boolean;
+  autoStopEnabled?: boolean;
+  autoStopMinutes?: number;
+  autoStopAt?: string;
   streamId?: string;
   platform?: string; // e.g., "youtube", "twitch", etc.
+  youtube?: {
+    broadcastId?: string;
+  };
+}
+
+export interface OrchestratorBroadcast {
+  broadcastId: string;
+  streamId?: string;
+  streamKey?: string;
+  streamUrl?: string;
+  videoId?: string;
+  sheetKey?: string;
+  title?: string;
+  description?: string;
+  scheduledStartTime?: string;
+  publicUrl?: string;
+  adminUrl?: string;
+  autoStart?: boolean;
+  autoStartScheduledAt?: string;
+  autoStartStartedAt?: string;
+  autoStartReservedAgentId?: string;
+  autoStopEnabled?: boolean;
+  autoStopMinutes?: number;
+  autoStopAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateBroadcastRequest {
+  title?: string;
+  description?: string;
+  scheduledStartTime?: string;
+  sheetKey?: string;
+  autoStart?: boolean;
+  autoStopEnabled?: boolean;
+  autoStopMinutes?: number;
+  streamContext?: {
+    context?: string;
+    drawNumber?: number;
+    sheet?: 'A' | 'B' | 'C' | 'D' | 'vibe';
+    team1?: string;
+    team2?: string;
+  };
 }
 
 export interface OrchestratorAgent {
@@ -184,6 +230,7 @@ export interface CreateJobRequest {
   inlineConfig?: any;
   idempotencyKey: string;
   restartPolicy?: string;
+  broadcastId?: string;
 }
 
 export interface OrchestratorHealth {
@@ -466,6 +513,73 @@ class ApiClient {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Failed to fetch jobs: ${res.status} ${res.statusText}`);
     return res.json();
+  }
+
+  async getBroadcasts(): Promise<OrchestratorBroadcast[]> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/broadcasts`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch broadcasts: ${res.status} ${res.statusText}`);
+    return res.json();
+  }
+
+  async refreshBroadcasts(): Promise<OrchestratorBroadcast[]> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/broadcasts/refresh-all`;
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to refresh broadcasts: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async refreshBroadcast(broadcastId: string): Promise<OrchestratorBroadcast> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/broadcasts/${broadcastId}/refresh`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to refresh broadcast: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async updateBroadcastMetadata(
+    broadcastId: string,
+    updates: { title?: string; description?: string; autoStart?: boolean; sheetKey?: string; autoStopEnabled?: boolean; autoStopMinutes?: number; autoStopAt?: string }
+  ): Promise<OrchestratorBroadcast> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/broadcasts/${broadcastId}/metadata`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to update broadcast: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async createBroadcast(request: CreateBroadcastRequest): Promise<OrchestratorBroadcast> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/broadcasts`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to create broadcast: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async deleteBroadcast(broadcastId: string): Promise<void> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/broadcasts/${broadcastId}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      throw new Error(errorText || `Failed to delete broadcast: ${res.status} ${res.statusText}`);
+    }
   }
 
   async createJob(jobRequest: CreateJobRequest): Promise<OrchestratorJob> {

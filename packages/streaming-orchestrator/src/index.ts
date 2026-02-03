@@ -34,7 +34,7 @@ const ENABLE_PUBLIC_ACCESS_RESTRICTIONS = process.env.ENABLE_PUBLIC_ACCESS_RESTR
 let currentStreamPrivacy: 'public' | 'unlisted' = (process.env.YOUTUBE_STREAM_PRIVACY === 'public' ? 'public' : 'unlisted');
 
 // In-memory alternate colors setting (not persisted)
-let useAlternateColors = false;
+let useAlternateColors = true;
 
 /**
  * Security: IP-based access control helpers
@@ -141,11 +141,36 @@ type TeamNamesStore = {
 	};
 };
 
+type BroadcastRecord = {
+	broadcastId: string;
+	streamId?: string;
+	streamKey?: string;
+	streamUrl?: string;
+	videoId?: string;
+	sheetKey?: string;
+	title?: string;
+	description?: string;
+	scheduledStartTime?: string;
+	publicUrl?: string;
+	adminUrl?: string;
+	autoStart?: boolean;
+	autoStartScheduledAt?: string;
+	autoStartStartedAt?: string;
+	autoStartReservedAgentId?: string;
+	autoStopEnabled?: boolean;
+	autoStopMinutes?: number;
+	autoStopAt?: string;
+	createdAt: string;
+	updatedAt: string;
+};
+
 const agents = new Map<string, AgentNode>();
 const jobs = new Map<string, Job>();
 const pendingByIdem = new Map<string, string>(); // idemKey -> jobId
 const streamHealth = new Map<string, { firstInactiveAt?: number; nextRestartAt?: number; attempts: number }>();
 const pendingRestarts = new Set<string>();
+const broadcasts = new Map<string, BroadcastRecord>();
+const autoStartReservedAgents = new Set<string>();
 const teamNames: TeamNamesStore = {
 	A: { red: '', yellow: '' },
 	B: { red: '', yellow: '' },
@@ -153,6 +178,136 @@ const teamNames: TeamNamesStore = {
 	D: { red: '', yellow: '' },
 	vibe: { red: '', yellow: '' },
 };
+
+const BROADCAST_STORE_PATH = process.env.BROADCAST_STORE_PATH || join(process.cwd(), "broadcasts.json");
+
+function loadBroadcastStore() {
+	if (!existsSync(BROADCAST_STORE_PATH)) return;
+	try {
+		const raw = readFileSync(BROADCAST_STORE_PATH, "utf-8");
+		const data = JSON.parse(raw) as BroadcastRecord[];
+		if (Array.isArray(data)) {
+			data.forEach((record) => {
+				if (record?.broadcastId) broadcasts.set(record.broadcastId, record);
+				if (record?.autoStart && record.autoStartReservedAgentId) {
+					autoStartReservedAgents.add(record.autoStartReservedAgentId);
+				}
+			});
+		}
+	} catch (error) {
+		console.error(`Failed to load broadcast store from ${BROADCAST_STORE_PATH}:`, error);
+	}
+}
+
+function persistBroadcastStore() {
+	try {
+		const data = Array.from(broadcasts.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+		writeFileSync(BROADCAST_STORE_PATH, JSON.stringify(data, null, 2), "utf-8");
+	} catch (error) {
+		console.error(`Failed to persist broadcast store to ${BROADCAST_STORE_PATH}:`, error);
+	}
+}
+
+function upsertBroadcast(record: BroadcastRecord) {
+	broadcasts.set(record.broadcastId, record);
+	persistBroadcastStore();
+}
+
+function removeBroadcast(broadcastId: string) {
+	const record = broadcasts.get(broadcastId);
+	if (record?.autoStartReservedAgentId) {
+		releaseAutoStartReservation(record.autoStartReservedAgentId);
+	}
+	if (broadcasts.delete(broadcastId)) {
+		persistBroadcastStore();
+	}
+}
+
+function listBroadcasts() {
+	return Array.from(broadcasts.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+loadBroadcastStore();
+
+function isAgentReserved(agentId: string): boolean {
+	return autoStartReservedAgents.has(agentId);
+}
+
+function broadcastReservationState(agentId: string) {
+	const agent = agents.get(agentId);
+	if (!agent) return;
+	broadcastUI(Msg.UIAgentUpdate, toPublicAgent(agent));
+}
+
+function getAvailableAgentForAutoStart(): AgentNode | null {
+	return Array.from(agents.values()).find((a) => a.state === "IDLE" && !a.drain && a.ws && !isAgentReserved(a.id)) ?? null;
+}
+
+function reserveAgentForAutoStart(): AgentNode | null {
+	const agent = getAvailableAgentForAutoStart();
+	if (!agent) return null;
+	autoStartReservedAgents.add(agent.id);
+	broadcastReservationState(agent.id);
+	return agent;
+}
+
+function releaseAutoStartReservation(agentId?: string) {
+	if (!agentId) return;
+	autoStartReservedAgents.delete(agentId);
+	broadcastReservationState(agentId);
+}
+
+function getStreamName(sheetKey?: string): string | undefined {
+	switch (sheetKey) {
+		case "sheetA":
+			return "Sheet A";
+		case "sheetB":
+			return "Sheet B";
+		case "sheetC":
+			return "Sheet C";
+		case "sheetD":
+			return "Sheet D";
+		case "vibe":
+			return "Vibe Stream";
+		default:
+			return undefined;
+	}
+}
+
+function getStreamContextFromKey(sheetKey?: string): StreamContext | undefined {
+	if (!sheetKey) return undefined;
+	const lower = sheetKey.toLowerCase();
+	if (lower === "vibe") return { sheet: "vibe" };
+	if (lower.startsWith("sheet")) {
+		const sheet = lower.replace("sheet", "").toUpperCase();
+		if (["A", "B", "C", "D"].includes(sheet)) {
+			return { sheet: sheet as StreamContext["sheet"] };
+		}
+	}
+	return undefined;
+}
+
+function buildStreamMetadataFromBroadcast(record: BroadcastRecord, streamContext?: StreamContext): StreamMetadata {
+	return {
+		title: record.title ?? '',
+		description: record.description ?? '',
+		platform: 'youtube',
+		publicUrl: record.publicUrl ?? (record.videoId ? `https://youtube.com/live/${record.videoId}` : undefined),
+		adminUrl: record.adminUrl ?? (record.videoId ? `https://studio.youtube.com/video/${record.videoId}` : undefined),
+		autoStopEnabled: record.autoStopEnabled,
+		autoStopMinutes: record.autoStopMinutes,
+		autoStopAt: record.autoStopAt,
+		youtube: {
+			broadcastId: record.broadcastId,
+			streamId: record.streamId,
+			streamKey: record.streamKey,
+			streamUrl: record.streamUrl,
+			scheduledStartTime: record.scheduledStartTime,
+			videoId: record.videoId,
+		},
+		streamContext,
+	};
+}
 
 // Rate limiter for YouTube broadcast creation: max 10 per 10 minutes
 const broadcastTimestamps: number[] = []; // Array of timestamps (ms since epoch)
@@ -385,8 +540,9 @@ async function endBroadcastForJob(job: Job, reason: string) {
 	const broadcastId = job.streamMetadata?.youtube?.broadcastId;
 	if (!broadcastId) return;
 	try {
-		await youtubeService.endBroadcast(broadcastId);
-		console.log(`✅ Ended YouTube broadcast for job ${job.id}. Reason: ${reason}`);
+		const result = await youtubeService.endOrDeleteBroadcast(broadcastId);
+		console.log(`✅ Ended YouTube broadcast for job ${job.id}. Result: ${result}. Reason: ${reason}`);
+		removeBroadcast(broadcastId);
 		emitJobEvent(job.id, "broadcast.completed", "YouTube broadcast completed", { reason, broadcastId });
 	} catch (error) {
 		console.error(`❌ Failed to end YouTube broadcast for job ${job.id}:`, error);
@@ -437,7 +593,12 @@ function toPublicAgent(a: AgentNode): AgentInfo {
 		ws?: WebSocket;
 		timers: unknown;
 	};
-	return rest as AgentInfo;
+	const publicAgent = rest as AgentInfo;
+	// Show RESERVED in UI when agent is held for auto-start
+	if (publicAgent.state === "IDLE" && isAgentReserved(publicAgent.id)) {
+		return { ...publicAgent, state: "RESERVED" };
+	}
+	return publicAgent;
 }
 
 function setAgentState(a: AgentNode, state: AgentState) {
@@ -1479,6 +1640,238 @@ app.get("/v1/jobs", async (req) => {
 	return Array.from(jobs.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 });
 
+// Broadcasts REST
+app.get("/v1/broadcasts", async () => {
+	return listBroadcasts();
+});
+
+app.post("/v1/broadcasts/refresh-all", async (_req, reply) => {
+	try {
+		const records = listBroadcasts();
+		const results = await Promise.allSettled(
+			records.map(async (record) => {
+				const lifecycle = await youtubeService.getBroadcastLifecycle(record.broadcastId);
+				const ended = !!lifecycle.actualEndTime || lifecycle.lifeCycleStatus === 'complete';
+				if (ended) {
+					removeBroadcast(record.broadcastId);
+				}
+			})
+		);
+
+		const failures = results.filter(r => r.status === 'rejected');
+		if (failures.length > 0) {
+			console.warn(`Broadcast refresh encountered ${failures.length} errors`);
+		}
+		return reply.code(200).send(listBroadcasts());
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : 'Unknown YouTube API error';
+		return reply.code(500).send({ error: errorMessage });
+	}
+});
+
+app.get<{ Params: { id: string } }>("/v1/broadcasts/:id/refresh", async (req, reply) => {
+	const record = broadcasts.get(req.params.id);
+	if (!record) return reply.code(404).send({ error: "Broadcast not found" });
+
+	try {
+		const details = await youtubeService.getBroadcastDetails(record.broadcastId);
+		const updated: BroadcastRecord = {
+			...record,
+			title: details.title ?? record.title,
+			description: details.description ?? record.description,
+			scheduledStartTime: details.scheduledStartTime ?? record.scheduledStartTime,
+			updatedAt: new Date().toISOString(),
+		};
+		upsertBroadcast(updated);
+		return reply.code(200).send(updated);
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : 'Unknown YouTube API error';
+		return reply.code(500).send({ error: errorMessage });
+	}
+});
+
+app.put<{
+	Params: { id: string };
+	Body: { title?: string; description?: string; autoStart?: boolean; sheetKey?: string; autoStopEnabled?: boolean; autoStopMinutes?: number; autoStopAt?: string };
+}>("/v1/broadcasts/:id/metadata", async (req, reply) => {
+	const record = broadcasts.get(req.params.id);
+	if (!record) return reply.code(404).send({ error: "Broadcast not found" });
+
+	try {
+		const nextAutoStart = req.body.autoStart;
+		let reservedAgentId = record.autoStartReservedAgentId;
+		if (nextAutoStart !== undefined) {
+			if (nextAutoStart) {
+				if (!record.scheduledStartTime) {
+					return reply.code(422).send({ error: "scheduledStartTime is required for auto-start broadcasts" });
+				}
+				const key = req.body.sheetKey ?? record.sheetKey;
+				if (!key) {
+					return reply.code(422).send({ error: "sheetKey is required for auto-start broadcasts" });
+				}
+				if (!record.autoStartReservedAgentId) {
+					const agent = reserveAgentForAutoStart();
+					if (!agent) {
+						return reply.code(409).send({ error: "No available agents to reserve for auto-start" });
+					}
+					reservedAgentId = agent.id;
+				}
+			} else {
+				releaseAutoStartReservation(record.autoStartReservedAgentId);
+				reservedAgentId = undefined;
+			}
+		}
+
+		if (req.body.title !== undefined || req.body.description !== undefined) {
+			await youtubeService.updateBroadcast(record.broadcastId, {
+				title: req.body.title ?? record.title,
+				description: req.body.description ?? record.description,
+			});
+		}
+		const updated: BroadcastRecord = {
+			...record,
+			title: req.body.title ?? record.title,
+			description: req.body.description ?? record.description,
+			autoStart: nextAutoStart ?? record.autoStart,
+			autoStartScheduledAt: nextAutoStart === false
+				? undefined
+				: (nextAutoStart ? record.scheduledStartTime : record.autoStartScheduledAt),
+			autoStartReservedAgentId: reservedAgentId,
+			sheetKey: req.body.sheetKey ?? record.sheetKey,
+			autoStopEnabled: req.body.autoStopEnabled ?? record.autoStopEnabled,
+			autoStopMinutes: req.body.autoStopEnabled === false ? undefined : (req.body.autoStopMinutes ?? record.autoStopMinutes),
+			autoStopAt: req.body.autoStopEnabled === false ? undefined : (req.body.autoStopAt ?? record.autoStopAt),
+			updatedAt: new Date().toISOString(),
+		};
+		upsertBroadcast(updated);
+		return reply.code(200).send(updated);
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : 'Unknown YouTube API error';
+		return reply.code(500).send({ error: errorMessage });
+	}
+});
+
+app.post<{
+	Body: {
+		title?: string;
+		description?: string;
+		scheduledStartTime?: string;
+		sheetKey?: string;
+		autoStart?: boolean;
+		autoStopEnabled?: boolean;
+		autoStopMinutes?: number;
+		streamContext?: {
+			context?: string;
+			drawNumber?: number;
+			sheet?: 'A' | 'B' | 'C' | 'D' | 'vibe';
+			team1?: string;
+			team2?: string;
+		};
+	};
+}>("/v1/broadcasts", async (req, reply) => {
+	const { title, description, scheduledStartTime, streamContext, sheetKey, autoStart, autoStopEnabled, autoStopMinutes } = req.body;
+	const scheduledDate = scheduledStartTime ? new Date(scheduledStartTime) : undefined;
+
+	let finalTitle: string;
+	let finalDescription: string;
+
+	if (title && title.trim()) {
+		finalTitle = title.trim();
+	} else if (streamContext) {
+		finalTitle = generateStreamTitle(streamContext, scheduledDate);
+	} else {
+		finalTitle = YouTubeService.generateStreamTitle(scheduledDate);
+	}
+
+	if (description && description.trim()) {
+		finalDescription = description.trim();
+	} else if (streamContext) {
+		finalDescription = generateStreamDescription(streamContext);
+	} else {
+		finalDescription = YouTubeService.generateStreamDescription();
+	}
+
+	if (!checkBroadcastRateLimit()) {
+		return reply.code(429).send({
+			error: "YouTube broadcast creation rate limit exceeded. Maximum 10 broadcasts per 10 minutes allowed.",
+			code: "RATE_LIMIT_EXCEEDED"
+		});
+	}
+
+	try {
+		let reservedAgentId: string | undefined;
+		if (autoStart) {
+			if (!scheduledStartTime) {
+				return reply.code(422).send({ error: "scheduledStartTime is required for auto-start broadcasts" });
+			}
+			if (!sheetKey) {
+				return reply.code(422).send({ error: "sheetKey is required for auto-start broadcasts" });
+			}
+			const agent = reserveAgentForAutoStart();
+			if (!agent) {
+				return reply.code(409).send({ error: "No available agents to reserve for auto-start" });
+			}
+			reservedAgentId = agent.id;
+		}
+
+		const scheduledIso = scheduledStartTime ? new Date(scheduledStartTime).toISOString() : undefined;
+		const youtubeMetadata = await youtubeService.createLiveBroadcast(
+			finalTitle,
+			finalDescription,
+			currentStreamPrivacy,
+			scheduledIso
+		);
+
+		recordBroadcastCreation();
+
+		const record: BroadcastRecord = {
+			broadcastId: youtubeMetadata.broadcastId!,
+			streamId: youtubeMetadata.streamId,
+			streamKey: youtubeMetadata.streamKey,
+			streamUrl: youtubeMetadata.streamUrl,
+			videoId: youtubeMetadata.videoId,
+			sheetKey,
+			title: finalTitle,
+			description: finalDescription,
+			scheduledStartTime: youtubeMetadata.scheduledStartTime,
+			publicUrl: `https://youtube.com/live/${youtubeMetadata.videoId}`,
+			adminUrl: `https://studio.youtube.com/video/${youtubeMetadata.videoId}`,
+			autoStart: !!autoStart,
+			autoStartScheduledAt: autoStart ? scheduledIso : undefined,
+			autoStartReservedAgentId: reservedAgentId,
+			autoStartStartedAt: undefined,
+			autoStopEnabled: !!autoStopEnabled,
+			autoStopMinutes: autoStopEnabled ? autoStopMinutes : undefined,
+			autoStopAt: autoStopEnabled && scheduledIso && autoStopMinutes
+				? new Date(new Date(scheduledIso).getTime() + autoStopMinutes * 60 * 1000).toISOString()
+				: undefined,
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+		if (sheetKey) record.sheetKey = sheetKey;
+		upsertBroadcast(record);
+
+		return reply.code(201).send(record);
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : 'Unknown YouTube API error';
+		return reply.code(500).send({ error: errorMessage });
+	}
+});
+
+app.delete<{ Params: { id: string } }>("/v1/broadcasts/:id", async (req, reply) => {
+	const record = broadcasts.get(req.params.id);
+	if (!record) return reply.code(404).send({ error: "Broadcast not found" });
+
+	try {
+		await youtubeService.endOrDeleteBroadcast(record.broadcastId);
+		removeBroadcast(record.broadcastId);
+		return reply.code(200).send({ ok: true });
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : 'Unknown YouTube API error';
+		return reply.code(500).send({ error: errorMessage });
+	}
+});
+
 app.get<{ Params: { id: string } }>("/v1/jobs/:id", async (req, reply) => {
 	const j = jobs.get(req.params.id);
 	if (!j) return reply.code(404).send({ error: "Not Found" });
@@ -1491,6 +1884,9 @@ app.post<{
 		inlineConfig?: Record<string, unknown>;
 		idempotencyKey?: string;
 		restartPolicy?: "never" | "onFailure";
+		autoStopEnabled?: boolean;
+		autoStopMinutes?: number;
+		broadcastId?: string;
 		streamContext?: {
 			context?: string;
 			drawNumber?: number;
@@ -1507,7 +1903,7 @@ app.post<{
 		requestId: Math.random().toString(36).substr(2, 9)
 	});
 
-	const { templateId, inlineConfig, idempotencyKey, restartPolicy, streamContext } = req.body;
+	const { templateId, inlineConfig, idempotencyKey, restartPolicy, streamContext, broadcastId, autoStopEnabled, autoStopMinutes } = req.body;
 
 	// Global rate limit check: prevent rapid-fire job creation requests
 	const now = Date.now();
@@ -1556,6 +1952,38 @@ app.post<{
 	console.log(`Created job ${job.id} with initial status: ${job.status}`);
 
 	if (idempotencyKey) pendingByIdem.set(idempotencyKey, job.id);
+
+	if (broadcastId) {
+		const record = broadcasts.get(broadcastId);
+		if (!record) {
+			updateJob(job.id, {
+				status: "FAILED",
+				error: { code: "BROADCAST_NOT_FOUND", message: "Selected broadcast not found" },
+			});
+			return reply.code(404).send(jobs.get(job.id));
+		}
+		if (!record.streamKey || !record.streamUrl) {
+			updateJob(job.id, {
+				status: "FAILED",
+				error: { code: "BROADCAST_MISSING_STREAM", message: "Selected broadcast missing stream details" },
+			});
+			return reply.code(422).send(jobs.get(job.id));
+		}
+
+		const streamMetadata = {
+			...buildStreamMetadataFromBroadcast(record, streamContext),
+			autoStopEnabled: autoStopEnabled ?? record.autoStopEnabled,
+			autoStopMinutes: autoStopEnabled === false ? undefined : (autoStopMinutes ?? record.autoStopMinutes),
+			autoStopAt: autoStopEnabled === false ? undefined : record.autoStopAt,
+		};
+
+		updateJob(job.id, {
+			streamMetadata,
+			status: "PENDING",
+		});
+
+		return reply.code(201).send(jobs.get(job.id));
+	}
 
 	// Auto-create YouTube stream for new jobs
 	try {
@@ -1622,8 +2050,24 @@ app.post<{
 			hasStreamKey: !!youtubeMetadata.streamKey
 		});
 
+		const broadcastRecord: BroadcastRecord = {
+			broadcastId: youtubeMetadata.broadcastId!,
+			streamId: youtubeMetadata.streamId,
+			streamKey: youtubeMetadata.streamKey,
+			streamUrl: youtubeMetadata.streamUrl,
+			videoId: youtubeMetadata.videoId,
+			title,
+			description,
+			scheduledStartTime: youtubeMetadata.scheduledStartTime,
+			publicUrl: `https://youtube.com/live/${youtubeMetadata.videoId}`,
+			adminUrl: `https://studio.youtube.com/video/${youtubeMetadata.videoId}`,
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		};
+		upsertBroadcast(broadcastRecord);
+
 		// Update job with YouTube metadata and stream context
-		const streamMetadata = {
+		const streamMetadata: StreamMetadata = {
 			title,
 			description,
 			platform: 'youtube',
@@ -1632,6 +2076,10 @@ app.post<{
 			youtube: youtubeMetadata,
 			streamContext, // Store the context for future reference
 		};
+		if (autoStopEnabled) {
+			streamMetadata.autoStopEnabled = true;
+			streamMetadata.autoStopMinutes = autoStopMinutes;
+		}
 
 		// Now mark the job as PENDING so it can be scheduled
 		updateJob(job.id, {
@@ -1665,6 +2113,8 @@ app.post<{
 app.post<{ Params: { id: string } }>("/v1/jobs/:id/stop", async (req, reply) => {
 	const job = jobs.get(req.params.id);
 	if (!job) return reply.code(404).send({ error: "Not Found" });
+	streamHealth.delete(job.id);
+	pendingRestarts.delete(job.id);
 	if (!job.agentId) {
 		updateJob(job.id, { status: "CANCELED", endedAt: new Date().toISOString() });
 		streamHealth.delete(job.id);
@@ -1672,10 +2122,14 @@ app.post<{ Params: { id: string } }>("/v1/jobs/:id/stop", async (req, reply) => 
 		void endBroadcastForJob(job, "job canceled without agent");
 		return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
 	}
-	const agent = agents.get(job.agentId);
-	if (!agent || agent.state === "OFFLINE" || !agent.ws) {
-		updateJob(job.id, { status: "UNKNOWN" });
-		return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
+	const targets = Array.from(agents.values()).filter((a) => a.currentJobId === job.id && a.ws && a.state !== "OFFLINE");
+	if (targets.length === 0) {
+		const agent = agents.get(job.agentId);
+		if (!agent || agent.state === "OFFLINE" || !agent.ws) {
+			updateJob(job.id, { status: "UNKNOWN" });
+			return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
+		}
+		targets.push(agent);
 	}
 	const msg: WSMessage = {
 		type: Msg.OrchestratorJobStop,
@@ -1683,7 +2137,9 @@ app.post<{ Params: { id: string } }>("/v1/jobs/:id/stop", async (req, reply) => 
 		ts: new Date().toISOString(),
 		payload: { jobId: job.id, reason: "User requested", deadlineMs: STOP_GRACE_MS },
 	};
-	agent.ws.send(JSON.stringify(msg));
+	for (const target of targets) {
+		target.ws?.send(JSON.stringify(msg));
+	}
 	updateJob(job.id, { status: "STOPPING" });
 	return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
 });
@@ -1714,6 +2170,12 @@ app.put<{
 	const job = jobs.get(req.params.id);
 	if (!job) return reply.code(404).send({ error: "Not Found" });
 
+	console.log(`Job metadata update ${job.id}`, {
+		autoStopEnabled: req.body.autoStopEnabled,
+		autoStopMinutes: req.body.autoStopMinutes,
+		autoStopAt: req.body.autoStopAt,
+	});
+
 	const updatedMetadata = { ...job.streamMetadata, ...req.body };
 	updateJob(job.id, { streamMetadata: updatedMetadata });
 
@@ -1728,6 +2190,18 @@ app.put<{
 		if (req.body.description !== undefined) youtubeUpdates.description = req.body.description;
 
 		scheduleYouTubeMetadataUpdate(job.id, broadcastId, youtubeUpdates);
+	}
+
+	if (broadcastId && hasUpdates) {
+		const existing = broadcasts.get(broadcastId);
+		if (existing) {
+			upsertBroadcast({
+				...existing,
+				title: req.body.title ?? existing.title,
+				description: req.body.description ?? existing.description,
+				updatedAt: new Date().toISOString(),
+			});
+		}
 	}
 
 	return reply.code(200).send({ ok: true, metadata: updatedMetadata });
@@ -2292,8 +2766,17 @@ wssAgents.on("connection", (ws, req) => {
 					setAgentState(agent, "RUNNING");
 				}
 
-				if (status === "RUNNING" && !j.startedAt) updateJob(jobId, { status, startedAt: new Date().toISOString() });
-				else updateJob(jobId, { status });
+				if (status === "RUNNING" && !j.startedAt) {
+					const next: Partial<Job> = { status, startedAt: new Date().toISOString() };
+					const minutes = j.streamMetadata?.autoStopMinutes;
+					if (j.streamMetadata?.autoStopEnabled && minutes && !j.streamMetadata.autoStopAt) {
+						const autoStopAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+						next.streamMetadata = { ...j.streamMetadata, autoStopAt };
+					}
+					updateJob(jobId, next);
+				} else {
+					updateJob(jobId, { status });
+				}
 				break;
 			}
 			case Msg.AgentJobStopped: {
@@ -2485,6 +2968,25 @@ async function sendAssignAndAwaitAck(agent: AgentNode, job: Job, ttlMs = 5000): 
 	return accepted;
 }
 
+async function assignJobToAgent(agent: AgentNode, job: Job): Promise<boolean> {
+	if (!agent.ws) return false;
+
+	setAgentState(agent, "RESERVED");
+	updateJob(job.id, { status: "ASSIGNED", agentId: agent.id });
+
+	const accepted = await sendAssignAndAwaitAck(agent, job, 5000);
+	if (!accepted) {
+		updateJob(job.id, { status: "PENDING", agentId: null });
+		setAgentState(agent, "IDLE");
+		return false;
+	}
+
+	agent.currentJobId = job.id;
+	setAgentState(agent, "STARTING");
+	updateJob(job.id, { status: "ACCEPTED" });
+	return true;
+}
+
 async function schedule() {
 	if (scheduling) return;
 	scheduling = true;
@@ -2493,8 +2995,8 @@ async function schedule() {
 		const pending = Array.from(jobs.values()).find((j) => j.status === "PENDING");
 		if (!pending) return;
 
-		// Find an IDLE non-draining agent
-		const idle = Array.from(agents.values()).find((a) => a.state === "IDLE" && !a.drain && a.ws);
+		// Find an IDLE non-draining agent that isn't reserved for auto-start
+		const idle = Array.from(agents.values()).find((a) => a.state === "IDLE" && !a.drain && a.ws && !isAgentReserved(a.id));
 		if (!idle) return;
 
 		// Reserve agent and assign
@@ -2547,6 +3049,16 @@ async function monitorStreamHealth() {
 
 			const lifeCycleStatus = status.lifeCycleStatus;
 			const streamStatus = status.streamStatus;
+			const concurrentViewers = status.concurrentViewers;
+
+			if (typeof concurrentViewers === "number") {
+				const currentViewers = job.streamMetadata?.viewers;
+				if (currentViewers !== concurrentViewers) {
+					updateJob(job.id, {
+						streamMetadata: { ...job.streamMetadata, viewers: concurrentViewers },
+					});
+				}
+			}
 			const ended = !!status.actualEndTime || lifeCycleStatus === "complete";
 			const inactive = streamStatus && streamStatus !== "active";
 
@@ -2617,8 +3129,108 @@ async function monitorStreamHealth() {
 	}
 }
 
+async function processAutoStartBroadcasts() {
+	const now = Date.now();
+	for (const record of broadcasts.values()) {
+		if (!record.autoStart) continue;
+		if (record.autoStartStartedAt) continue;
+		if (!record.scheduledStartTime) continue;
+		if (!record.sheetKey) continue;
+
+		const scheduledTs = new Date(record.scheduledStartTime).getTime();
+		if (Number.isNaN(scheduledTs) || scheduledTs > now) continue;
+		const existingJob = Array.from(jobs.values()).find((j) =>
+			j.streamMetadata?.youtube?.broadcastId === record.broadcastId &&
+			!["STOPPED", "FAILED", "DISMISSED", "CANCELED"].includes(j.status)
+		);
+		if (existingJob) continue;
+
+		let agent: AgentNode | null = null;
+		if (record.autoStartReservedAgentId) {
+			const reserved = agents.get(record.autoStartReservedAgentId);
+			if (reserved && reserved.state === "IDLE" && reserved.ws && !reserved.drain) {
+				agent = reserved;
+			} else {
+				releaseAutoStartReservation(record.autoStartReservedAgentId);
+			}
+		}
+
+		if (!agent) {
+			agent = reserveAgentForAutoStart();
+			if (!agent) continue;
+		}
+
+		const streamContext = getStreamContextFromKey(record.sheetKey);
+		const job = createJob({
+			inlineConfig: {
+				streamKey: record.sheetKey,
+				streamName: getStreamName(record.sheetKey),
+				title: record.title ?? '',
+				description: record.description ?? '',
+				muted: false,
+			},
+			idempotencyKey: `auto-start-${record.broadcastId}`,
+			restartPolicy: "never",
+			status: "CREATED",
+		}, "auto-start");
+
+		updateJob(job.id, {
+			streamMetadata: buildStreamMetadataFromBroadcast(record, streamContext),
+			status: "PENDING",
+		});
+
+		const assigned = await assignJobToAgent(agent, jobs.get(job.id)!);
+		if (assigned) {
+			releaseAutoStartReservation(record.autoStartReservedAgentId ?? agent.id);
+			upsertBroadcast({
+				...record,
+				autoStart: false,
+				autoStartStartedAt: new Date().toISOString(),
+				autoStartReservedAgentId: undefined,
+				updatedAt: new Date().toISOString(),
+			});
+		} else {
+			releaseAutoStartReservation(record.autoStartReservedAgentId ?? agent.id);
+			upsertBroadcast({
+				...record,
+				autoStartReservedAgentId: undefined,
+				updatedAt: new Date().toISOString(),
+			});
+		}
+	}
+}
+
+async function processAutoStopJobs() {
+	const now = Date.now();
+	for (const job of jobs.values()) {
+		if (job.status !== "RUNNING") continue;
+		if (!job.streamMetadata?.autoStopEnabled || !job.streamMetadata.autoStopAt) continue;
+		const stopTs = new Date(job.streamMetadata.autoStopAt).getTime();
+		if (Number.isNaN(stopTs) || stopTs > now) continue;
+
+		const agent = job.agentId ? agents.get(job.agentId) : null;
+		if (!agent || agent.state === "OFFLINE" || !agent.ws) {
+			updateJob(job.id, {
+				status: "FAILED",
+				endedAt: new Date().toISOString(),
+				error: { code: "AUTO_STOP_FAILED", message: "Agent unavailable for auto-stop" },
+			});
+			continue;
+		}
+
+		const msg: WSMessage = {
+			type: Msg.OrchestratorJobStop,
+			msgId: randomUUID(),
+			ts: new Date().toISOString(),
+			payload: { jobId: job.id, reason: "Auto-stop", deadlineMs: STOP_GRACE_MS },
+		};
+		agent.ws.send(JSON.stringify(msg));
+		updateJob(job.id, { status: "STOPPING" });
+	}
+}
+
 // Stream title and description generation functions
-function generateStreamTitle(context: StreamContext): string {
+function generateStreamTitle(context: StreamContext, scheduledDate?: Date): string {
 	const parts: string[] = [];
 
 	// Add context name (strip extra info like " - Fall 2025")
@@ -2631,7 +3243,7 @@ function generateStreamTitle(context: StreamContext): string {
 	}
 
 	// Get date (used in both formats)
-	const now = new Date();
+	const now = scheduledDate ?? new Date();
 	const month = now.getMonth() + 1;
 	const day = now.getDate();
 	const year = now.getFullYear();
@@ -2680,6 +3292,14 @@ setInterval(() => {
 setInterval(() => {
 	void monitorStreamHealth();
 }, STREAM_HEALTH_INTERVAL_MS);
+
+setInterval(() => {
+	void processAutoStartBroadcasts();
+}, 5000);
+
+setInterval(() => {
+	void processAutoStopJobs();
+}, 5000);
 
 /**
  * Start server

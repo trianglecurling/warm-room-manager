@@ -4,7 +4,7 @@ import { ExclamationTriangleIcon as ExclamationSolidIcon, CheckCircleIcon as Che
 import logo from '../assets/logo.png';
 import { useAutocomplete } from '../hooks/useAutocomplete';
 import { AutocompleteInput } from './AutocompleteInput';
-import { SearchResult, PresetData, CreateTeamRequest, PlayerPosition, apiClient, Team } from '../lib/api';
+import { SearchResult, PresetData, CreateTeamRequest, PlayerPosition, apiClient, Team, OrchestratorBroadcast } from '../lib/api';
 import { ContextModal } from './ContextModal';
 import { usePresets } from '../hooks/usePresets';
 import { PresetNameModal } from './PresetNameModal';
@@ -83,7 +83,7 @@ export const MonitorManager = () => {
   const [status, setStatus] = useState<{ kind: StatusKind; message: string } | null>(null);
   const [isFlashing, setIsFlashing] = useState(false);
   const [activeSection, setActiveSection] = useState('monitor-manager');
-  const [useAlternateColors, setUseAlternateColors] = useState(false);
+  const [useAlternateColors, setUseAlternateColors] = useState(true);
   
   // Track last update time for each stream to avoid cursor jumps
   const lastUpdateTimeRef = useRef<Record<StreamKey, number>>({} as Record<StreamKey, number>);
@@ -95,8 +95,11 @@ export const MonitorManager = () => {
     key: StreamKey;
     name: string;
     isLive: boolean;
-    muted: boolean;
     isPaused?: boolean;
+    broadcastId?: string;
+    autoStopEnabled?: boolean;
+    autoStopMinutes?: number;
+    autoStopAt?: string;
     title: string;
     description: string;
     viewers: number;
@@ -110,13 +113,56 @@ export const MonitorManager = () => {
   }
 
   const streamOrder: StreamKey[] = ['sheetA','sheetB','sheetC','sheetD','vibe'];
+  const NEW_BROADCAST_VALUE = '__new__';
   const [streams, setStreams] = useState<Record<StreamKey, StreamState>>({
-    sheetA: { key: 'sheetA', name: 'Sheet A', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    sheetB: { key: 'sheetB', name: 'Sheet B', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    sheetC: { key: 'sheetC', name: 'Sheet C', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    sheetD: { key: 'sheetD', name: 'Sheet D', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
-    vibe:   { key: 'vibe',   name: 'Vibe Stream', isLive: false, muted: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetA: { key: 'sheetA', name: 'Sheet A', isLive: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetB: { key: 'sheetB', name: 'Sheet B', isLive: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetC: { key: 'sheetC', name: 'Sheet C', isLive: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    sheetD: { key: 'sheetD', name: 'Sheet D', isLive: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
+    vibe:   { key: 'vibe',   name: 'Vibe Stream', isLive: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
   });
+  const [broadcasts, setBroadcasts] = useState<OrchestratorBroadcast[]>([]);
+  const [selectedBroadcastIds, setSelectedBroadcastIds] = useState<string[]>([]);
+  const [broadcastSelection, setBroadcastSelection] = useState<Record<StreamKey, string>>({
+    sheetA: NEW_BROADCAST_VALUE,
+    sheetB: NEW_BROADCAST_VALUE,
+    sheetC: NEW_BROADCAST_VALUE,
+    sheetD: NEW_BROADCAST_VALUE,
+    vibe: NEW_BROADCAST_VALUE,
+  });
+  const [startMenuOpenFor, setStartMenuOpenFor] = useState<StreamKey | null>(null);
+  const [bulkStartMenuOpen, setBulkStartMenuOpen] = useState(false);
+  const [bulkStopMenuOpen, setBulkStopMenuOpen] = useState(false);
+  const [scheduleDialog, setScheduleDialog] = useState<{ open: boolean; mode: 'single' | 'bulk'; streamKey?: StreamKey }>({
+    open: false,
+    mode: 'single',
+  });
+  const [scheduledStartLocal, setScheduledStartLocal] = useState<string>('');
+  const [scheduleMode, setScheduleMode] = useState<'datetime' | 'delay'>('datetime');
+  const [delayMinutes, setDelayMinutes] = useState<string>('60');
+  const [autoStartChecked, setAutoStartChecked] = useState(false);
+  const [autoStopChecked, setAutoStopChecked] = useState(false);
+  const [autoStopHours, setAutoStopHours] = useState<string>('2');
+  const [autoStopMinutes, setAutoStopMinutes] = useState<string>('15');
+  const [autoStopDialog, setAutoStopDialog] = useState<{ open: boolean; mode: 'running' | 'future' | 'running-bulk'; streamKey: StreamKey | null; streamKeys?: StreamKey[] }>({
+    open: false,
+    mode: 'future',
+    streamKey: null,
+  });
+  const [isCreatingBroadcast, setIsCreatingBroadcast] = useState(false);
+  const [nowTick, setNowTick] = useState(Date.now());
+  const [youtubeUpdateState, setYoutubeUpdateState] = useState<Record<StreamKey, { pending: boolean; message?: string }>>({
+    sheetA: { pending: false },
+    sheetB: { pending: false },
+    sheetC: { pending: false },
+    sheetD: { pending: false },
+    vibe: { pending: false },
+  });
+  const pendingYoutubeUpdatesRef = useRef<Record<StreamKey, { title?: string; description?: string }>>({} as Record<StreamKey, { title?: string; description?: string }>);
+  const youtubeUpdateTimersRef = useRef<Record<StreamKey, ReturnType<typeof setTimeout> | null>>({} as Record<StreamKey, ReturnType<typeof setTimeout> | null>);
+  const youtubeSuccessTimersRef = useRef<Record<StreamKey, ReturnType<typeof setTimeout> | null>>({} as Record<StreamKey, ReturnType<typeof setTimeout> | null>);
+  const streamsWithJobsRef = useRef<Record<StreamKey, StreamState> | null>(null);
+  const broadcastSelectionRef = useRef(broadcastSelection);
   const [selectedStreams, setSelectedStreams] = useState<StreamKey[]>([]);
 
   // Use orchestrator hook for real-time data
@@ -146,6 +192,16 @@ export const MonitorManager = () => {
       case 'vibe': return 'vibe';
       default: return 'A';
     }
+  };
+
+  const formatDateTimeLocal = (date: Date) => {
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 16);
+  };
+
+  const toIsoFromLocal = (value: string) => {
+    if (!value) return undefined;
+    return new Date(value).toISOString();
   };
 
   // Map orchestrator data to UI concepts
@@ -181,13 +237,39 @@ export const MonitorManager = () => {
     });
 
     // Convert back to array and map to UI format
-    return Array.from(agentMap.values()).map(agent => ({
+    return Array.from(agentMap.values())
+      .map(agent => ({
       id: agent.id,
       name: agent.name,
       status: agent.state,
       assignedStreamKey: orchestratorJobs.find(job => job.id === agent.currentJobId)?.inlineConfig?.streamKey as StreamKey | undefined,
-    }));
+      }))
+      .sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' }));
   }, [orchestratorAgents, orchestratorJobs]);
+
+  useEffect(() => {
+    broadcastSelectionRef.current = broadcastSelection;
+  }, [broadcastSelection]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const handleClickAway = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+    if (target.closest('[data-start-toggle], [data-start-menu], [data-bulk-start-toggle], [data-bulk-start-menu], [data-bulk-stop-toggle], [data-bulk-stop-menu]')) {
+        return;
+      }
+      setStartMenuOpenFor(null);
+      setBulkStartMenuOpen(false);
+    setBulkStopMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickAway);
+    return () => document.removeEventListener('mousedown', handleClickAway);
+  }, []);
 
   // Update streams based on orchestrator jobs
   const streamsWithJobs = useMemo(() => {
@@ -219,6 +301,10 @@ export const MonitorManager = () => {
             publicUrl: metadata?.publicUrl || null,
             adminUrl: metadata?.adminUrl || null,
             isPaused: metadata?.isPaused ?? false,
+            broadcastId: metadata?.youtube?.broadcastId,
+            autoStopEnabled: metadata?.autoStopEnabled,
+            autoStopMinutes: metadata?.autoStopMinutes,
+            autoStopAt: metadata?.autoStopAt,
             // ONLY use metadata for title/description (which gets synced to local state via useEffect)
             // Never use inlineConfig as it contains the pre-generation values
             title: updatedStreams[streamKey].title,
@@ -231,7 +317,6 @@ export const MonitorManager = () => {
               ...baseStreamData,
               isLive: true,
               viewers: metadata?.viewers ?? 0, // Use real viewer count from orchestrator
-              muted: metadata?.isMuted ?? updatedStreams[streamKey].muted,
             };
           } else if (job.status === 'FAILED' && job.error) {
             // Handle failed jobs by showing error state
@@ -261,6 +346,10 @@ export const MonitorManager = () => {
 
     return updatedStreams;
   }, [streams, orchestratorJobs]);
+
+  useEffect(() => {
+    streamsWithJobsRef.current = streamsWithJobs;
+  }, [streamsWithJobs]);
 
   // Sync title/description from job metadata to local state
   useEffect(() => {
@@ -300,6 +389,33 @@ export const MonitorManager = () => {
       }
     });
   }, [orchestratorJobs]);
+
+  useEffect(() => {
+    orchestratorJobs.forEach(job => {
+      if (!job.inlineConfig?.streamKey || !job.streamMetadata?.youtube?.broadcastId) return;
+      if (['STOPPED', 'FAILED', 'DISMISSED', 'CANCELED'].includes(job.status)) return;
+      const streamKey = job.inlineConfig.streamKey as StreamKey;
+      const broadcastId = job.streamMetadata.youtube.broadcastId;
+      setBroadcastSelection(prev => {
+        if (prev[streamKey] === broadcastId) return prev;
+        return { ...prev, [streamKey]: broadcastId };
+      });
+    });
+  }, [orchestratorJobs]);
+
+  useEffect(() => {
+    orchestratorJobs.forEach(job => {
+      if (!job.inlineConfig?.streamKey) return;
+      if (!['STOPPED', 'FAILED', 'DISMISSED', 'CANCELED'].includes(job.status)) return;
+      const streamKey = job.inlineConfig.streamKey as StreamKey;
+      const hasAutoStart = broadcasts.some(b => b.autoStart && b.sheetKey === streamKey);
+      if (hasAutoStart) return;
+      setBroadcastSelection(prev => {
+        if (prev[streamKey] === NEW_BROADCAST_VALUE) return prev;
+        return { ...prev, [streamKey]: NEW_BROADCAST_VALUE };
+      });
+    });
+  }, [orchestratorJobs, broadcasts]);
 
   // Stream start function that contains the actual logic
   const startStream = async (key: StreamKey) => {
@@ -378,13 +494,14 @@ export const MonitorManager = () => {
     const idempotencyKey = `stream-${key}-${Date.now()}`;
     console.log(`🎬 startStream: Generated idempotency key: ${idempotencyKey}`);
 
+    const selectedBroadcastId = broadcastSelection[key];
+    const defaultAutoStopMinutes = 140; // 2h 20m default for immediate starts
     const jobRequest = {
       inlineConfig: {
         streamKey: key,
         streamName: stream.name,
         title: stream.title, // Send empty string if blank - backend will auto-generate
         description: stream.description, // Send empty string if blank - backend will auto-generate
-        muted: stream.muted,
       },
       streamContext: {
         context: selectedContext || 'Triangle Curling',
@@ -392,9 +509,15 @@ export const MonitorManager = () => {
         team1: stream.redTeam || undefined,
         team2: stream.yellowTeam || undefined,
       },
+      autoStopEnabled: true,
+      autoStopMinutes: defaultAutoStopMinutes,
       idempotencyKey,
       restartPolicy: 'never' as const,
     };
+
+    if (selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE) {
+      (jobRequest as any).broadcastId = selectedBroadcastId;
+    }
 
     console.log(`🎬 startStream: Calling apiClient.createJob for ${key}`);
     // Create the job
@@ -435,6 +558,9 @@ export const MonitorManager = () => {
           }
           
           setSuccess(`Stopped ${stream.name}`);
+          setTimeout(() => {
+            refreshBroadcasts();
+          }, 2000);
         }
       }
     } catch (error: any) {
@@ -459,25 +585,261 @@ export const MonitorManager = () => {
     }
   };
 
+  const refreshBroadcasts = async () => {
+    try {
+      const data = await apiClient.refreshBroadcasts();
+      setBroadcasts(data);
+      setBroadcastSelection(prev => {
+        let updated = prev;
+        data.forEach((record) => {
+          if (record.autoStart && record.sheetKey) {
+            if (updated[record.sheetKey as StreamKey] !== record.broadcastId) {
+              updated = { ...updated, [record.sheetKey as StreamKey]: record.broadcastId };
+            }
+          }
+        });
+        return updated;
+      });
+    } catch (error: any) {
+      setError(`Failed to load broadcasts: ${error.message}`);
+    }
+  };
+
+  const createBroadcastForStream = async (
+    key: StreamKey,
+    scheduledStartTime?: string,
+    autoStart?: boolean,
+    autoStopEnabled?: boolean,
+    autoStopMinutesValue?: number
+  ) => {
+    const stream = streams[key];
+    const streamContext = {
+      context: selectedContext || 'Triangle Curling',
+      sheet: getSheetIdentifier(key),
+      team1: stream.redTeam || undefined,
+      team2: stream.yellowTeam || undefined,
+    };
+    const title = stream.title?.trim() ? stream.title.trim() : undefined;
+    const description = stream.description?.trim() ? stream.description.trim() : undefined;
+
+    const record = await apiClient.createBroadcast({
+      title,
+      description,
+      scheduledStartTime,
+      sheetKey: key,
+      autoStart: !!autoStart,
+      autoStopEnabled: !!autoStopEnabled,
+      autoStopMinutes: autoStopEnabled ? autoStopMinutesValue : undefined,
+      streamContext,
+    });
+
+    setBroadcasts(prev => [...prev, record].sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+    setBroadcastSelection(prev => ({ ...prev, [key]: record.broadcastId }));
+    if (record.title || record.description) {
+      setStreams(prev => ({
+        ...prev,
+        [key]: {
+          ...prev[key],
+          title: record.title ?? prev[key].title,
+          description: record.description ?? prev[key].description,
+        },
+      }));
+    }
+    return record;
+  };
+
+  const openScheduleDialog = (mode: 'single' | 'bulk', streamKey?: StreamKey) => {
+    setScheduleDialog({ open: true, mode, streamKey });
+    setScheduledStartLocal(formatDateTimeLocal(new Date(Date.now() + 60 * 60 * 1000)));
+    setScheduleMode('delay');
+    setDelayMinutes('10');
+    setAutoStartChecked(true);
+    setAutoStopChecked(true);
+    setAutoStopHours('2');
+    setAutoStopMinutes('15');
+  };
+
+  const closeScheduleDialog = () => {
+    setScheduleDialog({ open: false, mode: 'single' });
+  };
+
+  const confirmScheduleDialog = async () => {
+    if (scheduleMode === 'delay' && (!delayMinutes || Number(delayMinutes) < 1)) {
+      setError('Please enter a delay of at least 1 minute.');
+      return;
+    }
+    const scheduledIso = scheduleMode === 'delay'
+      ? toIsoFromLocal(formatDateTimeLocal(new Date(Date.now() + Number(delayMinutes || '0') * 60 * 1000)))
+      : toIsoFromLocal(scheduledStartLocal);
+    if (!scheduledIso) {
+      setError('Please select a start time.');
+      return;
+    }
+
+    if (isCreatingBroadcast) return;
+    setIsCreatingBroadcast(true);
+    try {
+      const totalAutoStopMinutes = autoStopChecked
+        ? Math.max(1, (Number(autoStopHours || '0') * 60) + Number(autoStopMinutes || '0'))
+        : undefined;
+      if (scheduleDialog.mode === 'single' && scheduleDialog.streamKey) {
+        await createBroadcastForStream(scheduleDialog.streamKey, scheduledIso, autoStartChecked, autoStopChecked, totalAutoStopMinutes);
+        setSuccess(`Created broadcast for ${streams[scheduleDialog.streamKey].name}`);
+      } else {
+        const targets = selectedButNotRunning();
+        await Promise.all(targets.map(key => createBroadcastForStream(key, scheduledIso, autoStartChecked, autoStopChecked, totalAutoStopMinutes)));
+        setSuccess(`Created ${targets.length} broadcast(s) without streaming`);
+      }
+      closeScheduleDialog();
+    } catch (error: any) {
+      setError(`Failed to create broadcast: ${error.message}`);
+    } finally {
+      setIsCreatingBroadcast(false);
+    }
+  };
+
+  const openAutoStopDialog = (key: StreamKey, mode: 'running' | 'future', initialMinutes?: number) => {
+    setAutoStopDialog({ open: true, mode, streamKey: key });
+    const total = initialMinutes ?? 135;
+    setAutoStopHours(String(Math.floor(total / 60)));
+    setAutoStopMinutes(String(total % 60));
+  };
+
+  const openAutoStopDialogForRunning = (keys: StreamKey[], initialMinutes?: number) => {
+    setAutoStopDialog({ open: true, mode: 'running-bulk', streamKey: null, streamKeys: keys });
+    const total = initialMinutes ?? 135;
+    setAutoStopHours(String(Math.floor(total / 60)));
+    setAutoStopMinutes(String(total % 60));
+  };
+
+  const closeAutoStopDialog = () => {
+    setAutoStopDialog({ open: false, mode: 'future', streamKey: null });
+  };
+
+  const confirmAutoStopDialog = async () => {
+    const totalMinutes = Math.max(1, (Number(autoStopHours || '0') * 60) + Number(autoStopMinutes || '0'));
+
+    try {
+      const applyRunningJob = async (jobId?: string) => {
+        if (!jobId) return;
+        if (!autoStopChecked) {
+          await apiClient.updateJobMetadata(jobId, { autoStopEnabled: false, autoStopAt: null, autoStopMinutes: null });
+        } else {
+          const autoStopAt = new Date(Date.now() + totalMinutes * 60 * 1000).toISOString();
+          await apiClient.updateJobMetadata(jobId, { autoStopEnabled: true, autoStopAt, autoStopMinutes: totalMinutes });
+        }
+      };
+
+      if (autoStopDialog.mode === 'running' && autoStopDialog.streamKey) {
+        const keyLower = autoStopDialog.streamKey.toLowerCase();
+        const jobId = orchestratorJobs.find(job => (job.status === 'RUNNING' || job.status === 'STARTING') && String(job.inlineConfig?.streamKey ?? '').toLowerCase() === keyLower)?.id;
+        await applyRunningJob(jobId);
+      } else if (autoStopDialog.mode === 'running-bulk') {
+        const selected = new Set(effectiveSelectedStreams().map(k => k.toLowerCase()));
+        const runningJobs = orchestratorJobs.filter(job => job.status === 'RUNNING' || job.status === 'STARTING');
+        if (runningJobs.some(job => String(job.inlineConfig?.streamKey ?? '').toLowerCase() === 'vibe')) {
+          selected.add('vibe');
+        }
+        const targetJobs = selected.size > 0
+          ? runningJobs.filter(job => selected.has(String(job.inlineConfig?.streamKey ?? '').toLowerCase()))
+          : runningJobs;
+        console.log('🛑 Bulk auto stop', {
+          selected: Array.from(selected),
+          runningJobs: runningJobs.map(j => ({ id: j.id, streamKey: j.inlineConfig?.streamKey, status: j.status })),
+          targetJobs: targetJobs.map(j => ({ id: j.id, streamKey: j.inlineConfig?.streamKey, status: j.status })),
+          autoStopChecked,
+          totalMinutes,
+        });
+        await Promise.all(targetJobs.map(job => applyRunningJob(job.id)));
+      } else if (autoStopDialog.streamKey) {
+        const key = autoStopDialog.streamKey;
+        const currentBroadcastId = broadcastSelection[key];
+        if (!currentBroadcastId || currentBroadcastId === NEW_BROADCAST_VALUE) return;
+        if (!autoStopChecked) {
+          await apiClient.updateBroadcastMetadata(currentBroadcastId, { autoStopEnabled: false, autoStopMinutes: undefined, autoStopAt: undefined });
+        } else {
+          await apiClient.updateBroadcastMetadata(currentBroadcastId, { autoStopEnabled: true, autoStopMinutes: totalMinutes });
+        }
+        await refreshBroadcasts();
+      }
+      closeAutoStopDialog();
+    } catch (error: any) {
+      setError(`Failed to update auto-stop: ${error.message}`);
+    }
+  };
+
+
+  const scheduleYouTubeUpdate = (key: StreamKey, updates: { title?: string; description?: string }) => {
+    pendingYoutubeUpdatesRef.current[key] = {
+      ...pendingYoutubeUpdatesRef.current[key],
+      ...updates,
+    };
+
+    if (youtubeUpdateTimersRef.current[key]) {
+      clearTimeout(youtubeUpdateTimersRef.current[key]!);
+    }
+
+    setYoutubeUpdateState(prev => ({
+      ...prev,
+      [key]: { pending: true },
+    }));
+
+    youtubeUpdateTimersRef.current[key] = setTimeout(async () => {
+      const pending = pendingYoutubeUpdatesRef.current[key];
+      pendingYoutubeUpdatesRef.current[key] = {};
+
+      const streamMap = streamsWithJobsRef.current;
+      if (!streamMap) {
+        setYoutubeUpdateState(prev => ({ ...prev, [key]: { pending: false } }));
+        return;
+      }
+      const stream = streamMap[key];
+      const selectedBroadcastId = broadcastSelectionRef.current[key];
+
+      try {
+        if (stream.jobId) {
+          await apiClient.updateJobMetadata(stream.jobId, pending);
+        } else if (selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE) {
+          const updated = await apiClient.updateBroadcastMetadata(selectedBroadcastId, pending);
+          setBroadcasts(prev => prev.map(b => (b.broadcastId === updated.broadcastId ? updated : b)));
+        } else {
+          setYoutubeUpdateState(prev => ({ ...prev, [key]: { pending: false } }));
+          return;
+        }
+
+        setYoutubeUpdateState(prev => ({
+          ...prev,
+          [key]: { pending: false, message: 'YouTube updated successfully' },
+        }));
+
+        if (youtubeSuccessTimersRef.current[key]) {
+          clearTimeout(youtubeSuccessTimersRef.current[key]!);
+        }
+        youtubeSuccessTimersRef.current[key] = setTimeout(() => {
+          setYoutubeUpdateState(prev => ({
+            ...prev,
+            [key]: { pending: false },
+          }));
+        }, 5000);
+      } catch (error: any) {
+        setYoutubeUpdateState(prev => ({ ...prev, [key]: { pending: false } }));
+        setError(`Failed to update YouTube: ${error.message}`);
+      }
+    }, 5000);
+  };
 
   const updateTitle = async (key: StreamKey, title: string) => {
     const stream = streamsWithJobs[key];
+    const selectedBroadcastId = broadcastSelection[key];
     
     // Mark that we just updated this stream (to prevent cursor jumps from syncing)
     lastUpdateTimeRef.current[key] = Date.now();
     
     // Always update local state immediately for responsive UI
     setStreams(prev => ({ ...prev, [key]: { ...prev[key], title } }));
-    
-    if (stream.jobId) {
-      // If there's an active job, also update the job metadata
-      // This will be debounced and sent to YouTube API if the stream is running
-      try {
-        await apiClient.updateJobMetadata(stream.jobId, { title });
-        // The WebSocket update will sync the authoritative value back
-      } catch (error: any) {
-        setError(`Failed to update title: ${error.message}`);
-      }
+
+    if (stream.jobId || (selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE)) {
+      scheduleYouTubeUpdate(key, { title });
     }
   };
 
@@ -500,21 +862,16 @@ export const MonitorManager = () => {
 
   const updateDescription = async (key: StreamKey, description: string) => {
     const stream = streamsWithJobs[key];
+    const selectedBroadcastId = broadcastSelection[key];
     
     // Mark that we just updated this stream (to prevent cursor jumps from syncing)
     lastUpdateTimeRef.current[key] = Date.now();
     
     // Always update local state immediately for responsive UI
     setStreams(prev => ({ ...prev, [key]: { ...prev[key], description } }));
-    
-    if (stream.jobId) {
-      // If there's an active job, also update the job metadata
-      // This will be debounced and sent to YouTube API if the stream is running
-      try {
-        await apiClient.updateJobMetadata(stream.jobId, { description });
-      } catch (error: any) {
-        setError(`Failed to update description: ${error.message}`);
-      }
+
+    if (stream.jobId || (selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE)) {
+      scheduleYouTubeUpdate(key, { description });
     }
   };
 
@@ -537,26 +894,6 @@ export const MonitorManager = () => {
     }
   };
 
-  const refreshViewers = async (key?: StreamKey[]) => {
-    // Refresh viewer data from orchestrator for active streams
-    const keys = key && key.length ? key : streamOrder;
-
-    for (const streamKey of keys) {
-      const stream = streamsWithJobs[streamKey];
-      if (stream.jobId) {
-        try {
-          // Get fresh metadata from orchestrator
-          await apiClient.getJobMetadata(stream.jobId);
-          // The metadata update will come through WebSocket and update the UI
-        } catch (error) {
-          console.warn(`Failed to refresh metadata for ${stream.name}:`, error);
-          // Fall back to keeping current values
-        }
-      }
-    }
-
-    setSuccess('Refreshed viewer data');
-  };
   const toggleSelect = (key: StreamKey) => {
     if (key === 'vibe') return; // Vibe stream is auto-selected, not manually selectable
     // Don't allow unselecting running streams - they should always remain selected
@@ -663,6 +1000,9 @@ export const MonitorManager = () => {
         return fn();
       }));
       setSuccess(`Started ${pendingStreamStarts.length} stream(s)`);
+      setTimeout(() => {
+        refreshBroadcasts();
+      }, 2000);
     } catch (error: any) {
       setError(`Failed to start streams: ${error.message}`);
     } finally {
@@ -698,8 +1038,30 @@ export const MonitorManager = () => {
     try {
       await Promise.all(streamsToStop.map((k: StreamKey) => toggleLive(k, false)));
       setSuccess(`Stopped ${streamsToStop.length} stream(s)`);
+      setTimeout(() => {
+        refreshBroadcasts();
+      }, 2000);
     } catch (error: any) {
       setError(`Failed to stop streams: ${error.message}`);
+    }
+  };
+
+  const toggleBroadcastSelection = (broadcastId: string) => {
+    setSelectedBroadcastIds(prev => (
+      prev.includes(broadcastId) ? prev.filter(id => id !== broadcastId) : [...prev, broadcastId]
+    ));
+  };
+
+  const deleteSelectedBroadcasts = async () => {
+    if (selectedBroadcastIds.length === 0) return;
+    if (!confirm(`Delete ${selectedBroadcastIds.length} broadcast(s)? This will end them on YouTube.`)) return;
+    try {
+      await Promise.all(selectedBroadcastIds.map(id => apiClient.deleteBroadcast(id)));
+      setSelectedBroadcastIds([]);
+      await refreshBroadcasts();
+      setSuccess(`Deleted ${selectedBroadcastIds.length} broadcast(s)`);
+    } catch (error: any) {
+      setError(`Failed to delete broadcasts: ${error.message}`);
     }
   };
   // no-op placeholder for future bulk metadata if needed
@@ -724,6 +1086,10 @@ export const MonitorManager = () => {
     apiClient.getAlternateColors()
       .then(result => setUseAlternateColors(result.alternateColors))
       .catch(err => console.error('Failed to load alternate colors setting:', err));
+
+    apiClient.getBroadcasts()
+      .then(setBroadcasts)
+      .catch(err => console.error('Failed to load broadcasts:', err));
     
     // Fetch team names from orchestrator
     fetch('http://localhost:3014/v1/teamnames')
@@ -2460,10 +2826,15 @@ export const MonitorManager = () => {
 
             {/* Bulk Controls */}
             <div className="bg-white rounded-lg shadow p-4 mb-6">
-              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center justify-between mb-3">
                 <h2 className="text-lg font-semibold text-gray-900">Multiple Stream Control</h2>
-                <div className="text-sm text-gray-600">Available agents: {availableAgents()} / {agents.length}</div>
+                  <div className="text-sm text-gray-600">
+                    Available agents: {availableAgents()} / {agents.length}
+                  </div>
               </div>
+                <div className="text-sm text-gray-600 mb-3">
+                  Total viewers: {streamOrder.reduce((sum, key) => sum + (streamsWithJobs[key]?.viewers ?? 0), 0)}
+                </div>
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-2 mr-4">
                   <button className="btn btn-secondary text-xs px-3 py-2" onClick={selectAll} title="Select all streams">Select All</button>
@@ -2471,15 +2842,71 @@ export const MonitorManager = () => {
                   <span className="text-sm text-gray-600">{displaySelectedCount()} selected</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button className="btn btn-primary text-sm px-4 py-2 disabled:opacity-50" onClick={bulkStart} disabled={!canStart() || !orchestratorConnected}>
-                    {orchestratorConnected ? `Start ${numSelectedNotRunning()} Stream${numSelectedNotRunning() === 1 ? '' : 's'}` : 'Orchestrator Offline'}
-                  </button>
-                  <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" onClick={bulkStop} disabled={!canStop() || !orchestratorConnected}>
-                    {orchestratorConnected ? `Stop ${numRunningStreams()} Stream${numRunningStreams() === 1 ? '' : 's'}` : 'Orchestrator Offline'}
-                  </button>
-                  <span className="text-gray-300">|</span>
-                  <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" disabled={true} title="Mute functionality not yet implemented">Mute (Disabled)</button>
-                  <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50" disabled={true} title="Unmute functionality not yet implemented">Unmute (Disabled)</button>
+                  <div className="relative inline-flex">
+                    <button className="btn btn-primary text-sm px-4 py-2 disabled:opacity-50 rounded-r-none" onClick={bulkStart} disabled={!canStart() || !orchestratorConnected}>
+                      {orchestratorConnected ? `Start ${numSelectedNotRunning()} Stream${numSelectedNotRunning() === 1 ? '' : 's'}` : 'Orchestrator Offline'}
+                    </button>
+                    <button
+                      className="btn btn-primary text-sm px-2 py-2 disabled:opacity-50 rounded-l-none border-l border-blue-700/30"
+                      onClick={() => setBulkStartMenuOpen(prev => !prev)}
+                      disabled={!orchestratorConnected || numSelectedNotRunning() === 0}
+                      title="More start options"
+                      data-bulk-start-toggle
+                    >
+                      ▾
+                    </button>
+                    {bulkStartMenuOpen && (
+                      <div className="absolute z-10 right-0 top-full mt-1 w-64 bg-white border border-gray-200 rounded shadow" data-bulk-start-menu>
+                        <button
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                          onClick={() => {
+                            setBulkStartMenuOpen(false);
+                            openScheduleDialog('bulk');
+                          }}
+                        >
+                          Schedule future stream
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="relative inline-flex">
+                    <button className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50 rounded-r-none" onClick={bulkStop} disabled={!canStop() || !orchestratorConnected}>
+                      {orchestratorConnected ? `Stop ${numRunningStreams()} Stream${numRunningStreams() === 1 ? '' : 's'}` : 'Orchestrator Offline'}
+                    </button>
+                    <button
+                      className="btn btn-secondary text-sm px-2 py-2 disabled:opacity-50 rounded-l-none border-l border-gray-300/60"
+                      onClick={() => setBulkStopMenuOpen(prev => !prev)}
+                      disabled={!canStop() || !orchestratorConnected}
+                      title="More stop options"
+                      data-bulk-stop-toggle
+                    >
+                      ▾
+                    </button>
+                    {bulkStopMenuOpen && (
+                      <div className="absolute z-10 right-0 top-full mt-1 w-64 bg-white border border-gray-200 rounded shadow" data-bulk-stop-menu>
+                        <button
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                          onClick={() => {
+                            setBulkStopMenuOpen(false);
+                            const running = runningStreams();
+                            const selected = effectiveSelectedStreams();
+                            const runningSelected = selected.filter((key) => running.includes(key));
+                            const targets = runningSelected.length > 0 ? runningSelected : running;
+                            if (targets.length > 0) {
+                              const stream = streamsWithJobs[targets[0]];
+                              const initialMinutes = stream.autoStopAt
+                                ? Math.ceil((new Date(stream.autoStopAt).getTime() - nowTick) / 60000)
+                                : (stream.autoStopMinutes ?? 135);
+                              setAutoStopChecked(!!stream.autoStopEnabled);
+                              openAutoStopDialogForRunning(targets, initialMinutes);
+                            }
+                          }}
+                        >
+                          Configure auto stop
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <span className="text-gray-300">|</span>
                   <button
                     className="btn btn-secondary text-sm px-4 py-2"
@@ -2607,6 +3034,32 @@ export const MonitorManager = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
               {streamOrder.map(key => {
                 const s = streamsWithJobs[key];
+                const autoStartRecord = broadcasts.find((b) => b.autoStart && b.sheetKey === key);
+                const currentBroadcastId = (s.isLive && s.broadcastId)
+                  ? s.broadcastId
+                  : (autoStartRecord?.broadcastId ?? broadcastSelection[key] ?? NEW_BROADCAST_VALUE);
+                const selectedBroadcast = currentBroadcastId && currentBroadcastId !== NEW_BROADCAST_VALUE
+                  ? broadcasts.find(b => b.broadcastId === currentBroadcastId)
+                  : undefined;
+                const autoStartEnabled = !!selectedBroadcast?.autoStart;
+                const canToggleAutoStart = orchestratorConnected &&
+                  !s.isLive &&
+                  currentBroadcastId &&
+                  currentBroadcastId !== NEW_BROADCAST_VALUE &&
+                  (availableAgents() > 0 || autoStartEnabled);
+                const scheduledStartTime = selectedBroadcast?.scheduledStartTime;
+                const scheduledStartMs = scheduledStartTime ? new Date(scheduledStartTime).getTime() : undefined;
+                const countdownMs = scheduledStartMs ? scheduledStartMs - nowTick : undefined;
+                const showCountdown = !s.isLive && countdownMs !== undefined && countdownMs > 0;
+                const showAutoStart = showCountdown;
+                const runtimeMinutesFromBroadcast = selectedBroadcast?.autoStopMinutes;
+                const toCountdown = (ms: number) => {
+                  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+                  const hours = Math.floor(totalSeconds / 3600);
+                  const minutes = Math.floor((totalSeconds % 3600) / 60);
+                  const seconds = totalSeconds % 60;
+                  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                };
                 const selected = key === 'vibe'
                   ? selectedStreams.filter(k => k !== 'vibe').length >= 2 // Vibe is selected if 2+ other streams are selected
                   : effectiveSelectedStreams().includes(key);
@@ -2632,13 +3085,48 @@ export const MonitorManager = () => {
                               <span className="text-xs font-medium text-amber-700">Paused</span>
                             </>
                           )}
-                          <span className="text-gray-300">•</span>
-                          <span className="text-sm text-gray-600">Viewers: {s.viewers}</span>
+                          {s.isLive && (
+                            <>
+                              <span className="text-gray-300">•</span>
+                              <span className="text-sm text-gray-600">Viewers: {s.viewers}</span>
+                            </>
+                          )}
                         </div>
                         {showRestart && restartInfo && (
                           <div className="mt-1 text-xs text-amber-700">
                             Restart attempt {restartInfo.attempt}/3{restartInfo.backoffMs ? ` (backoff ${Math.round(restartInfo.backoffMs / 1000)}s)` : ''}
                           </div>
+                        )}
+                        {showCountdown && (
+                          <div className="mt-1 text-xs text-blue-700">
+                            Broadcast set to begin in {toCountdown(countdownMs!)}
+                          </div>
+                        )}
+                        {s.isLive && s.autoStopAt && (
+                          <div className="mt-1 text-xs text-purple-700 flex items-center gap-2">
+                            <span>Auto stopping in {toCountdown(new Date(s.autoStopAt).getTime() - nowTick)}</span>
+                            <button
+                              className="text-xs text-blue-600 hover:text-blue-700 underline"
+                              onClick={() => {
+                                const initialMinutes = s.autoStopAt
+                                  ? Math.ceil((new Date(s.autoStopAt).getTime() - nowTick) / 60000)
+                                  : (s.autoStopMinutes ?? 135);
+                                setAutoStopChecked(!!s.autoStopEnabled);
+                                openAutoStopDialog(key, 'running', initialMinutes);
+                              }}
+                            >
+                              edit
+                            </button>
+                          </div>
+                        )}
+                        {youtubeUpdateState[key]?.pending && (
+                          <div className="mt-1 flex items-center gap-2 text-xs text-gray-600">
+                            <span className="inline-block w-3 h-3 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
+                            Updating YouTube...
+                          </div>
+                        )}
+                        {!youtubeUpdateState[key]?.pending && youtubeUpdateState[key]?.message && (
+                          <div className="mt-1 text-xs text-green-700">{youtubeUpdateState[key].message}</div>
                         )}
                         {s.error && (
                           <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-800 relative">
@@ -2663,37 +3151,136 @@ export const MonitorManager = () => {
 
                     <div className="mt-4 space-y-3">
                       <div className="flex items-center gap-2">
-                        <button
-                          className="btn btn-primary text-sm px-4 py-2 disabled:opacity-50"
-                          onClick={() => toggleLive(key, !s.isLive)}
-                          disabled={!orchestratorConnected}
-                        >
-                          {orchestratorConnected ? (s.isLive ? 'Stop' : 'Start') : 'Offline'}
-                        </button>
-                        <button
-                          className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"
-                          onClick={() => togglePause(key)}
-                          disabled={!orchestratorConnected || !s.jobId || s.jobStatus !== 'RUNNING'}
-                          title={!s.jobId ? 'No active job' : s.jobStatus !== 'RUNNING' ? 'Pause available when running' : s.isPaused ? 'Resume stream' : 'Pause stream'}
-                        >
-                          {s.isPaused ? 'Unpause' : 'Pause'}
-                        </button>
-                        <button
-                          className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"
-                          disabled={true}
-                          title="Mute functionality not yet implemented"
-                        >
-                          {s.muted ? 'Unmute' : 'Mute'} (Disabled)
-                        </button>
-                        <button
-                          className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"
-                          onClick={() => refreshViewers([key])}
-                          disabled={!orchestratorConnected}
-                        >
-                          {orchestratorConnected ? 'Refresh viewers' : 'Offline'}
-                        </button>
+                        <div className="relative inline-flex">
+                          <button
+                            className="btn btn-primary text-sm px-4 py-2 disabled:opacity-50 rounded-r-none"
+                            onClick={() => toggleLive(key, !s.isLive)}
+                            disabled={!orchestratorConnected}
+                          >
+                            {orchestratorConnected ? (s.isLive ? 'Stop' : 'Start') : 'Offline'}
+                          </button>
+                          <button
+                            className="btn btn-primary text-sm px-2 py-2 disabled:opacity-50 rounded-l-none border-l border-blue-700/30"
+                            onClick={() => setStartMenuOpenFor(prev => (prev === key ? null : key))}
+                            disabled={!orchestratorConnected}
+                            title={s.isLive ? 'More stop options' : 'More start options'}
+                            data-start-toggle
+                          >
+                            ▾
+                          </button>
+                          {startMenuOpenFor === key && (
+                            <div className="absolute z-10 left-0 top-full mt-1 w-64 bg-white border border-gray-200 rounded shadow" data-start-menu>
+                              {!s.isLive && (
+                                <button
+                                  className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                                  onClick={() => {
+                                    setStartMenuOpenFor(null);
+                                    openScheduleDialog('single', key);
+                                  }}
+                                >
+                                  Schedule future stream
+                                </button>
+                              )}
+                              {(s.isLive || showCountdown) && (
+                                <button
+                                  className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                                  onClick={() => {
+                                    setStartMenuOpenFor(null);
+                                    const initialMinutes = s.isLive
+                                      ? (s.autoStopAt ? Math.ceil((new Date(s.autoStopAt).getTime() - nowTick) / 60000) : (s.autoStopMinutes ?? 135))
+                                      : (runtimeMinutesFromBroadcast ?? 135);
+                                    setAutoStopChecked(!!(s.isLive ? s.autoStopEnabled : runtimeMinutesFromBroadcast));
+                                    openAutoStopDialog(key, s.isLive ? 'running' : 'future', initialMinutes);
+                                  }}
+                                >
+                                  Configure auto stop
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        {s.isLive && (
+                          <button
+                            className="btn btn-secondary text-sm px-4 py-2 disabled:opacity-50"
+                            onClick={() => togglePause(key)}
+                            disabled={!orchestratorConnected || !s.jobId || s.jobStatus !== 'RUNNING'}
+                            title={!s.jobId ? 'No active job' : s.jobStatus !== 'RUNNING' ? 'Pause available when running' : s.isPaused ? 'Resume stream' : 'Pause stream'}
+                          >
+                            {s.isPaused ? 'Unpause' : 'Pause'}
+                          </button>
+                        )}
                       </div>
                       <div className="grid grid-cols-1 gap-2">
+                        <div className="flex flex-col">
+                          <label className="text-sm font-medium text-gray-700 mb-1">Broadcast</label>
+                          <select
+                            className="px-3 py-2 border border-gray-300 rounded-md disabled:bg-gray-100 disabled:text-gray-500 disabled:border-gray-200 disabled:cursor-not-allowed"
+                            value={currentBroadcastId}
+                            onChange={async (e) => {
+                              const nextId = e.target.value;
+                              setBroadcastSelection(prev => ({ ...prev, [key]: nextId }));
+                              if (nextId === NEW_BROADCAST_VALUE) {
+                                setStreams(prev => ({
+                                  ...prev,
+                                  [key]: { ...prev[key], title: '', description: '' },
+                                }));
+                                return;
+                              }
+                              if (nextId) {
+                                try {
+                                  const refreshed = await apiClient.refreshBroadcast(nextId);
+                                  setBroadcasts(prev => prev.map(b => (b.broadcastId === refreshed.broadcastId ? refreshed : b)));
+                                  setStreams(prev => ({
+                                    ...prev,
+                                    [key]: {
+                                      ...prev[key],
+                                      title: refreshed.title ?? prev[key].title,
+                                      description: refreshed.description ?? prev[key].description,
+                                    },
+                                  }));
+                                } catch (error: any) {
+                                  setError(`Failed to refresh broadcast: ${error.message}`);
+                                }
+                              }
+                            }}
+                            disabled={s.isLive || autoStartEnabled}
+                          >
+                            <option value={NEW_BROADCAST_VALUE}>Create new broadcast</option>
+                            {s.isLive && s.broadcastId && !broadcasts.find(b => b.broadcastId === s.broadcastId) && (
+                              <option value={s.broadcastId}>Current broadcast (not in list)</option>
+                            )}
+                            {broadcasts.map((b) => (
+                              <option key={b.broadcastId} value={b.broadcastId}>
+                                {b.title ? b.title : b.broadcastId}{b.scheduledStartTime ? ` (${new Date(b.scheduledStartTime).toLocaleString()})` : ''}
+                              </option>
+                            ))}
+                          </select>
+                          {showAutoStart && (
+                            <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
+                              <input
+                                type="checkbox"
+                                checked={autoStartEnabled}
+                                disabled={!canToggleAutoStart}
+                                onChange={async (e) => {
+                                  if (!currentBroadcastId || currentBroadcastId === NEW_BROADCAST_VALUE) return;
+                                  try {
+                                    const updated = await apiClient.updateBroadcastMetadata(currentBroadcastId, {
+                                      autoStart: e.target.checked,
+                                      sheetKey: key,
+                                    });
+                                    setBroadcasts(prev => prev.map(b => (b.broadcastId === updated.broadcastId ? updated : b)));
+                                  } catch (error: any) {
+                                    setError(`Failed to update auto start: ${error.message}`);
+                                  }
+                                }}
+                              />
+                              Auto start stream
+                              {!autoStartEnabled && availableAgents() === 0 && (
+                                <span className="text-xs text-gray-500">(no agents available)</span>
+                              )}
+                            </label>
+                          )}
+                        </div>
                         <div className="flex flex-col">
                           <label className="text-sm font-medium text-gray-700 mb-1">Title</label>
                           <input 
@@ -2798,7 +3385,7 @@ export const MonitorManager = () => {
                   </button>
                 </div>
               )}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
                 {agents.map((a, idx) => {
                   const orchestratorAgent = orchestratorAgents.find(oa => oa.id === a.id);
                   return (
@@ -2863,6 +3450,66 @@ export const MonitorManager = () => {
                   );
                 })}
               </div>
+            </div>
+
+            {/* Broadcast Management */}
+            <div className="mt-8 bg-white rounded-lg shadow p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold text-gray-900">Broadcast Management</h2>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="btn btn-secondary text-sm px-3 py-2 disabled:opacity-50"
+                    onClick={refreshBroadcasts}
+                    disabled={!orchestratorConnected}
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    className="btn btn-secondary text-sm px-3 py-2 disabled:opacity-50"
+                    onClick={deleteSelectedBroadcasts}
+                    disabled={!orchestratorConnected || selectedBroadcastIds.length === 0}
+                  >
+                    Delete Selected
+                  </button>
+                </div>
+              </div>
+              {!orchestratorConnected ? (
+                <div className="text-xs text-red-600">Orchestrator service not connected</div>
+              ) : broadcasts.length === 0 ? (
+                <div className="text-sm text-gray-500">No stored broadcasts.</div>
+              ) : (
+                <div className="space-y-2">
+                  {broadcasts.map((b) => (
+                    <div key={b.broadcastId} className="flex items-center justify-between border rounded-md px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4"
+                          checked={selectedBroadcastIds.includes(b.broadcastId)}
+                          onChange={() => toggleBroadcastSelection(b.broadcastId)}
+                        />
+                        <div>
+                          <div className="text-sm font-medium text-gray-800">
+                            {b.title || 'Untitled Broadcast'}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {b.scheduledStartTime ? `Scheduled: ${new Date(b.scheduledStartTime).toLocaleString()}` : 'No scheduled start'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        {b.publicUrl && (
+                          <a href={b.publicUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:text-blue-700">Public</a>
+                        )}
+                        {b.adminUrl && (
+                          <a href={b.adminUrl} target="_blank" rel="noreferrer" className="text-gray-700 hover:text-gray-900">Studio</a>
+                        )}
+                        <span className="text-gray-400">{b.broadcastId}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -2932,6 +3579,169 @@ export const MonitorManager = () => {
         onConfirm={executePendingStreamStarts}
         onCancel={cancelPendingStreamStarts}
       />
+    )}
+    {scheduleDialog.open && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-lg shadow-lg p-5 w-[360px]">
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">
+            {scheduleDialog.mode === 'bulk' ? 'Schedule Broadcasts' : 'Schedule Broadcast'}
+          </h3>
+          <p className="text-sm text-gray-600 mb-4">
+            Choose a scheduled start time for the broadcast{scheduleDialog.mode === 'bulk' ? 's' : ''}.
+          </p>
+          <div className="space-y-3">
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="radio"
+                name="scheduleMode"
+                checked={scheduleMode === 'datetime'}
+                onChange={() => setScheduleMode('datetime')}
+              />
+              Specific date/time
+            </label>
+            {scheduleMode === 'datetime' && (
+              <input
+                type="datetime-local"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                value={scheduledStartLocal}
+                onChange={(e) => setScheduledStartLocal(e.target.value)}
+              />
+            )}
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="radio"
+                name="scheduleMode"
+                checked={scheduleMode === 'delay'}
+                onChange={() => setScheduleMode('delay')}
+              />
+              Delay (minutes)
+            </label>
+            {scheduleMode === 'delay' && (
+              <input
+                type="number"
+                min="1"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                value={delayMinutes}
+                onChange={(e) => setDelayMinutes(e.target.value)}
+              />
+            )}
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={autoStartChecked}
+                disabled={availableAgents() === 0}
+                onChange={(e) => setAutoStartChecked(e.target.checked)}
+              />
+              Auto start stream
+              {availableAgents() === 0 && (
+                <span className="text-xs text-gray-500">(no agents available)</span>
+              )}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={autoStopChecked}
+                onChange={(e) => setAutoStopChecked(e.target.checked)}
+              />
+              Auto stop stream
+            </label>
+            {autoStopChecked && (
+              <div className="space-y-2">
+                <div className="text-xs text-gray-500">
+                  Set total runtime for this stream.
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex flex-col text-xs text-gray-600">
+                    Hours
+                    <input
+                      type="number"
+                      min="0"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      value={autoStopHours}
+                      onChange={(e) => setAutoStopHours(e.target.value)}
+                    />
+                  </label>
+                  <label className="flex flex-col text-xs text-gray-600">
+                    Minutes
+                    <input
+                      type="number"
+                      min="0"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      value={autoStopMinutes}
+                      onChange={(e) => setAutoStopMinutes(e.target.value)}
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <button className="btn btn-secondary text-sm px-3 py-2" onClick={closeScheduleDialog} disabled={isCreatingBroadcast}>Cancel</button>
+            <button className="btn btn-primary text-sm px-3 py-2" onClick={confirmScheduleDialog} disabled={isCreatingBroadcast}>
+              {isCreatingBroadcast ? 'Creating broadcast...' : 'OK'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    {autoStopDialog.open && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-lg shadow-lg p-5 w-[360px]">
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">Auto stop stream</h3>
+          <p className="text-sm text-gray-600 mb-4">
+            {autoStopDialog.mode === 'running'
+              ? 'Set time until stop.'
+              : autoStopDialog.mode === 'running-bulk'
+                ? 'Set time until stop for all running streams.'
+                : 'Set total runtime for the scheduled stream.'}
+          </p>
+          <label className="flex items-center gap-2 text-sm text-gray-700 mb-3">
+            <input
+              type="checkbox"
+              checked={autoStopChecked}
+              onChange={(e) => setAutoStopChecked(e.target.checked)}
+            />
+            Enable auto stop
+          </label>
+          {autoStopChecked && (
+            <div className="space-y-2">
+              <div className="text-xs text-gray-500">
+                {autoStopDialog.mode === 'running'
+                  ? 'Set remaining runtime for this stream.'
+                  : autoStopDialog.mode === 'running-bulk'
+                    ? 'Set remaining runtime for all running streams.'
+                    : 'Set total runtime for this stream.'}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col text-xs text-gray-600">
+                  Hours
+                  <input
+                    type="number"
+                    min="0"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    value={autoStopHours}
+                    onChange={(e) => setAutoStopHours(e.target.value)}
+                  />
+                </label>
+                <label className="flex flex-col text-xs text-gray-600">
+                  Minutes
+                  <input
+                    type="number"
+                    min="0"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                    value={autoStopMinutes}
+                    onChange={(e) => setAutoStopMinutes(e.target.value)}
+                  />
+                </label>
+              </div>
+            </div>
+          )}
+          <div className="mt-4 flex justify-end gap-2">
+            <button className="btn btn-secondary text-sm px-3 py-2" onClick={closeAutoStopDialog}>Cancel</button>
+            <button className="btn btn-primary text-sm px-3 py-2" onClick={confirmAutoStopDialog}>OK</button>
+          </div>
+        </div>
+      </div>
     )}
   </div>
 );

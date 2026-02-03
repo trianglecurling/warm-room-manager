@@ -62,6 +62,9 @@ export interface StreamMetadata {
 	adminUrl?: string;
 	isMuted?: boolean;
 	isPaused?: boolean;
+	autoStopEnabled?: boolean;
+	autoStopMinutes?: number;
+	autoStopAt?: string;
 	streamId?: string;
 	platform?: string; // e.g., "youtube", "twitch", etc.
 	youtube?: YouTubeMetadata;

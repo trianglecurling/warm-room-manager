@@ -72,7 +72,7 @@ export class YouTubeService {
 	/**
 	 * Create a new YouTube live broadcast
 	 */
-	async createLiveBroadcast(title: string, description: string, privacy?: 'public' | 'unlisted'): Promise<YouTubeMetadata> {
+	async createLiveBroadcast(title: string, description: string, privacy?: 'public' | 'unlisted', scheduledStartTime?: string): Promise<YouTubeMetadata> {
 		if (DISABLE_YOUTUBE_API) {
 			console.log(`🎭 YouTube API DISABLED - Returning mock broadcast data for: "${title}"`);
 
@@ -84,7 +84,7 @@ export class YouTubeService {
 				streamKey: `mock-stream-key-${mockBroadcastId}`,
 				streamUrl: 'rtmp://mock.youtube.com/live2',
 				privacyStatus: privacy || 'unlisted',
-				scheduledStartTime: new Date(Date.now() + 60000).toISOString(),
+				scheduledStartTime: scheduledStartTime ?? new Date(Date.now() + 60000).toISOString(),
 				channelId: 'mock-channel-id',
 				videoId: mockBroadcastId
 			};
@@ -102,7 +102,7 @@ export class YouTubeService {
 					snippet: {
 						title,
 						description,
-						scheduledStartTime: new Date(Date.now() + 60000).toISOString(), // Start in 1 minute
+						scheduledStartTime: scheduledStartTime ?? new Date(Date.now() + 60000).toISOString(), // Start in 1 minute
 					},
 					status: {
 						privacyStatus: (privacy || 'unlisted') as 'public' | 'unlisted',
@@ -305,12 +305,59 @@ export class YouTubeService {
 	}
 
 	/**
+	 * End or delete a broadcast depending on its lifecycle status.
+	 * Useful for cleaning up scheduled broadcasts that never went live.
+	 */
+	async endOrDeleteBroadcast(broadcastId: string): Promise<"complete" | "deleted" | "noop"> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Mock end/delete broadcast: ${broadcastId}`);
+			return "noop";
+		}
+
+		if (!this.youtube) {
+			throw new Error('YouTube OAuth2 credentials not configured');
+		}
+
+		try {
+			const statusResp = await this.youtube.liveBroadcasts.list({
+				part: ['status'],
+				id: [broadcastId],
+			});
+			const broadcast = statusResp.data.items?.[0];
+			const lifeCycleStatus = (broadcast?.status as any)?.lifeCycleStatus;
+
+			if (!lifeCycleStatus || lifeCycleStatus === 'complete') {
+				return "noop";
+			}
+
+			if (lifeCycleStatus === 'live' || lifeCycleStatus === 'testing') {
+				await this.youtube.liveBroadcasts.transition({
+					part: ['status'],
+					broadcastStatus: 'complete',
+					id: broadcastId,
+				});
+				console.log(`Completed YouTube broadcast ${broadcastId}`);
+				return "complete";
+			}
+
+			// created/ready/etc: delete the broadcast
+			await this.youtube.liveBroadcasts.delete({ id: broadcastId });
+			console.log(`Deleted YouTube broadcast ${broadcastId}`);
+			return "deleted";
+		} catch (error) {
+			console.error(`Failed to end/delete broadcast ${broadcastId}:`, error);
+			throw new Error(`YouTube API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	/**
 	 * Get broadcast + stream status for health monitoring
 	 */
 	async getBroadcastAndStreamStatus(broadcastId: string, streamId: string): Promise<{
 		lifeCycleStatus?: string;
 		actualEndTime?: string;
 		streamStatus?: string;
+		concurrentViewers?: number;
 	}> {
 		if (DISABLE_YOUTUBE_API) {
 			console.log(`🎭 YouTube API DISABLED - Returning mock health status for broadcast: ${broadcastId}`);
@@ -318,6 +365,7 @@ export class YouTubeService {
 				lifeCycleStatus: 'live',
 				actualEndTime: undefined,
 				streamStatus: 'active',
+				concurrentViewers: Math.floor(Math.random() * 100),
 			};
 		}
 
@@ -328,7 +376,7 @@ export class YouTubeService {
 		try {
 			const [broadcastResponse, streamResponse] = await Promise.all([
 				this.youtube.liveBroadcasts.list({
-					part: ['status'],
+					part: ['status', 'statistics'],
 					id: [broadcastId],
 				}),
 				this.youtube.liveStreams.list({
@@ -344,6 +392,9 @@ export class YouTubeService {
 				lifeCycleStatus: (broadcast?.status as any)?.lifeCycleStatus,
 				actualEndTime: (broadcast?.status as any)?.actualEndTime,
 				streamStatus: (stream?.status as any)?.streamStatus,
+				concurrentViewers: broadcast?.statistics?.concurrentViewers
+					? Number(broadcast.statistics.concurrentViewers)
+					: undefined,
 			};
 		} catch (error) {
 			console.error(`Failed to get broadcast/stream status for ${broadcastId}:`, error);
@@ -352,10 +403,81 @@ export class YouTubeService {
 	}
 
 	/**
+	 * Fetch broadcast snippet details (title/description/scheduled time)
+	 */
+	async getBroadcastDetails(broadcastId: string): Promise<{
+		title?: string;
+		description?: string;
+		scheduledStartTime?: string;
+	}> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Returning mock details for broadcast: ${broadcastId}`);
+			return {
+				title: 'Mock Broadcast',
+				description: 'Mock Description',
+				scheduledStartTime: new Date(Date.now() + 60000).toISOString(),
+			};
+		}
+
+		if (!this.youtube) {
+			throw new Error('YouTube OAuth2 credentials not configured');
+		}
+
+		try {
+			const response = await this.youtube.liveBroadcasts.list({
+				part: ['snippet'],
+				id: [broadcastId],
+			});
+			const broadcast = response.data.items?.[0];
+			const snippet = broadcast?.snippet;
+			return {
+				title: snippet?.title || undefined,
+				description: snippet?.description || undefined,
+				scheduledStartTime: snippet?.scheduledStartTime || undefined,
+			};
+		} catch (error) {
+			console.error(`Failed to get broadcast details for ${broadcastId}:`, error);
+			throw new Error(`YouTube API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	/**
+	 * Get broadcast lifecycle status for cleanup checks
+	 */
+	async getBroadcastLifecycle(broadcastId: string): Promise<{
+		lifeCycleStatus?: string;
+		actualEndTime?: string;
+	}> {
+		if (DISABLE_YOUTUBE_API) {
+			console.log(`🎭 YouTube API DISABLED - Returning mock lifecycle for broadcast: ${broadcastId}`);
+			return { lifeCycleStatus: 'live', actualEndTime: undefined };
+		}
+
+		if (!this.youtube) {
+			throw new Error('YouTube OAuth2 credentials not configured');
+		}
+
+		try {
+			const response = await this.youtube.liveBroadcasts.list({
+				part: ['status'],
+				id: [broadcastId],
+			});
+			const broadcast = response.data.items?.[0];
+			return {
+				lifeCycleStatus: (broadcast?.status as any)?.lifeCycleStatus,
+				actualEndTime: (broadcast?.status as any)?.actualEndTime,
+			};
+		} catch (error) {
+			console.error(`Failed to get broadcast lifecycle for ${broadcastId}:`, error);
+			throw new Error(`YouTube API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	/**
 	 * Generate a stream title and description
 	 */
-	static generateStreamTitle(): string {
-		const now = new Date();
+	static generateStreamTitle(scheduledDate?: Date): string {
+		const now = scheduledDate ?? new Date();
 		const month = now.getMonth() + 1;
 		const day = now.getDate();
 		const year = now.getFullYear();
