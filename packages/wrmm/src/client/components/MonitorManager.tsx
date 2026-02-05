@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, memo } from 'react';
 import { ArrowsUpDownIcon, ArrowsRightLeftIcon, PlusCircleIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { ExclamationTriangleIcon as ExclamationSolidIcon, CheckCircleIcon as CheckSolidIcon, PencilSquareIcon } from '@heroicons/react/24/solid';
 import logo from '../assets/logo.png';
@@ -31,6 +31,59 @@ interface MonitorData {
 
 // Track whether a textarea's current content originated from a Team selection (unmodified)
 type TeamOrigin = Partial<Record<keyof MonitorData, { red?: Team; yellow?: Team }>>;
+
+type StreamTextFieldProps = {
+  value: string;
+  placeholder?: string;
+  className?: string;
+  onChange: (value: string) => void;
+  isTextarea?: boolean;
+};
+
+const StreamTextField = memo(({
+  value,
+  placeholder,
+  className,
+  onChange,
+  isTextarea,
+}: StreamTextFieldProps) => {
+  const [localValue, setLocalValue] = useState(value ?? '');
+  const lastEditRef = useRef(0);
+
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastEditRef.current < 500) return;
+    if (localValue !== value) {
+      setLocalValue(value ?? '');
+    }
+  }, [value, localValue]);
+
+  const handleChange = (next: string) => {
+    lastEditRef.current = Date.now();
+    setLocalValue(next);
+    onChange(next);
+  };
+
+  if (isTextarea) {
+    return (
+      <textarea
+        className={className}
+        placeholder={placeholder}
+        value={localValue}
+        onChange={e => handleChange(e.target.value)}
+      />
+    );
+  }
+
+  return (
+    <input
+      className={className}
+      placeholder={placeholder}
+      value={localValue}
+      onChange={e => handleChange(e.target.value)}
+    />
+  );
+});
 
 export const MonitorManager = () => {
   const [monitorData, setMonitorData] = useState<MonitorData>({
@@ -121,6 +174,20 @@ export const MonitorManager = () => {
     sheetD: { key: 'sheetD', name: 'Sheet D', isLive: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
     vibe:   { key: 'vibe',   name: 'Vibe Stream', isLive: false, isPaused: false, title: '', description: '', viewers: 0, publicUrl: null, adminUrl: null, redTeam: '', yellowTeam: '' },
   });
+  const draftTitlesRef = useRef<Record<StreamKey, string>>({
+    sheetA: '',
+    sheetB: '',
+    sheetC: '',
+    sheetD: '',
+    vibe: '',
+  });
+  const draftDescriptionsRef = useRef<Record<StreamKey, string>>({
+    sheetA: '',
+    sheetB: '',
+    sheetC: '',
+    sheetD: '',
+    vibe: '',
+  });
   const [broadcasts, setBroadcasts] = useState<OrchestratorBroadcast[]>([]);
   const [selectedBroadcastIds, setSelectedBroadcastIds] = useState<string[]>([]);
   const [broadcastSelection, setBroadcastSelection] = useState<Record<StreamKey, string>>({
@@ -163,6 +230,9 @@ export const MonitorManager = () => {
   const youtubeSuccessTimersRef = useRef<Record<StreamKey, ReturnType<typeof setTimeout> | null>>({} as Record<StreamKey, ReturnType<typeof setTimeout> | null>);
   const streamsWithJobsRef = useRef<Record<StreamKey, StreamState> | null>(null);
   const broadcastSelectionRef = useRef(broadcastSelection);
+  const jobStatusRef = useRef<Record<string, string>>({});
+  const lastBroadcastRefreshAtRef = useRef(0);
+
   const [selectedStreams, setSelectedStreams] = useState<StreamKey[]>([]);
 
   // Use orchestrator hook for real-time data
@@ -351,6 +421,16 @@ export const MonitorManager = () => {
     streamsWithJobsRef.current = streamsWithJobs;
   }, [streamsWithJobs]);
 
+  useEffect(() => {
+    const now = Date.now();
+    streamOrder.forEach(key => {
+      const lastUpdate = lastUpdateTimeRef.current[key] || 0;
+      if (now - lastUpdate < 2000) return;
+      draftTitlesRef.current[key] = streams[key].title ?? '';
+      draftDescriptionsRef.current[key] = streams[key].description ?? '';
+    });
+  }, [streams]);
+
   // Sync title/description from job metadata to local state
   useEffect(() => {
     orchestratorJobs.forEach(job => {
@@ -404,6 +484,47 @@ export const MonitorManager = () => {
   }, [orchestratorJobs]);
 
   useEffect(() => {
+    const stoppedStatuses = new Set(['STOPPED', 'FAILED', 'CANCELED', 'DISMISSED', 'UNKNOWN']);
+    let shouldRefresh = false;
+    const now = Date.now();
+
+    orchestratorJobs.forEach(job => {
+      const prevStatus = jobStatusRef.current[job.id];
+      if (prevStatus === job.status) return;
+      jobStatusRef.current[job.id] = job.status;
+
+      if (!stoppedStatuses.has(job.status)) return;
+      shouldRefresh = true;
+
+      const streamKey = job.inlineConfig?.streamKey as StreamKey | undefined;
+      if (!streamKey || streamKey === 'vibe') return;
+
+      setStreams(prev => {
+        const current = prev[streamKey];
+        if (!current || (!current.redTeam && !current.yellowTeam)) return prev;
+        return {
+          ...prev,
+          [streamKey]: {
+            ...current,
+            redTeam: '',
+            yellowTeam: '',
+          },
+        };
+      });
+
+      const sheetId = getSheetIdentifier(streamKey);
+      apiClient.updateTeamNames(sheetId, '', '').catch(err => {
+        console.error(`Failed to clear team names for ${streamKey}:`, err);
+      });
+    });
+
+    if (shouldRefresh && now - lastBroadcastRefreshAtRef.current > 3000) {
+      lastBroadcastRefreshAtRef.current = now;
+      refreshBroadcasts();
+    }
+  }, [orchestratorJobs]);
+
+  useEffect(() => {
     orchestratorJobs.forEach(job => {
       if (!job.inlineConfig?.streamKey) return;
       if (!['STOPPED', 'FAILED', 'DISMISSED', 'CANCELED'].includes(job.status)) return;
@@ -411,6 +532,11 @@ export const MonitorManager = () => {
       const hasAutoStart = broadcasts.some(b => b.autoStart && b.sheetKey === streamKey);
       if (hasAutoStart) return;
       setBroadcastSelection(prev => {
+        const currentSelection = prev[streamKey];
+        if (currentSelection && currentSelection !== NEW_BROADCAST_VALUE) {
+          const stillExists = broadcasts.some(b => b.broadcastId === currentSelection);
+          if (stillExists) return prev;
+        }
         if (prev[streamKey] === NEW_BROADCAST_VALUE) return prev;
         return { ...prev, [streamKey]: NEW_BROADCAST_VALUE };
       });
@@ -496,12 +622,14 @@ export const MonitorManager = () => {
 
     const selectedBroadcastId = broadcastSelection[key];
     const defaultAutoStopMinutes = 140; // 2h 20m default for immediate starts
+    const draftTitle = draftTitlesRef.current[key] || stream.title;
+    const draftDescription = draftDescriptionsRef.current[key] || stream.description;
     const jobRequest = {
       inlineConfig: {
         streamKey: key,
         streamName: stream.name,
-        title: stream.title, // Send empty string if blank - backend will auto-generate
-        description: stream.description, // Send empty string if blank - backend will auto-generate
+        title: draftTitle, // Send empty string if blank - backend will auto-generate
+        description: draftDescription, // Send empty string if blank - backend will auto-generate
       },
       streamContext: {
         context: selectedContext || 'Triangle Curling',
@@ -585,6 +713,38 @@ export const MonitorManager = () => {
     }
   };
 
+  const cancelAutoStart = async (broadcastId: string) => {
+    try {
+      const updated = await apiClient.updateBroadcastMetadata(broadcastId, { autoStart: false });
+      setBroadcasts(prev => prev.map(b => (b.broadcastId === updated.broadcastId ? updated : b)));
+      setSuccess('Auto start canceled');
+    } catch (error: any) {
+      setError(`Failed to cancel auto start: ${error.message}`);
+    }
+  };
+
+  const clearStreamCard = async (key: StreamKey) => {
+    setBroadcastSelection(prev => ({ ...prev, [key]: NEW_BROADCAST_VALUE }));
+    draftTitlesRef.current[key] = '';
+    draftDescriptionsRef.current[key] = '';
+    setStreams(prev => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        title: '',
+        description: '',
+        redTeam: '',
+        yellowTeam: '',
+      },
+    }));
+    if (key !== 'vibe') {
+      const sheetId = getSheetIdentifier(key);
+      apiClient.updateTeamNames(sheetId, '', '').catch(err => {
+        console.error(`Failed to clear team names for ${key}:`, err);
+      });
+    }
+  };
+
   const refreshBroadcasts = async () => {
     try {
       const data = await apiClient.refreshBroadcasts();
@@ -613,14 +773,42 @@ export const MonitorManager = () => {
     autoStopMinutesValue?: number
   ) => {
     const stream = streams[key];
+    let team1 = stream.redTeam || undefined;
+    let team2 = stream.yellowTeam || undefined;
+
+    if (key !== 'vibe' && (!team1 || !team2)) {
+      const sheetId = getSheetIdentifier(key) as keyof MonitorData;
+      const sheet = monitorData[sheetId];
+      const toPlayers = (value?: string) =>
+        (value || '').split('\n').map(s => s.trim()).filter(Boolean);
+      const extractTeamName = (players: string[]): string => {
+        if (!players || players.length === 0) return '';
+        const getLastName = (fullName: string): string => {
+          const parts = fullName.trim().split(/\s+/);
+          return parts.length > 0 ? parts[parts.length - 1] : '';
+        };
+        if (players.length === 4) return getLastName(players[0]);
+        if (players.length === 5) return getLastName(players[1]);
+        if (players.length === 2) return `${getLastName(players[0])}/${getLastName(players[1])}`;
+        if (players.length === 3) return `${getLastName(players[1])}/${getLastName(players[2])}`;
+        return getLastName(players[0]);
+      };
+      const redFromMonitor = extractTeamName(toPlayers(sheet?.red));
+      const yellowFromMonitor = extractTeamName(toPlayers(sheet?.yellow));
+      team1 = team1 || redFromMonitor || undefined;
+      team2 = team2 || yellowFromMonitor || undefined;
+    }
+
     const streamContext = {
       context: selectedContext || 'Triangle Curling',
       sheet: getSheetIdentifier(key),
-      team1: stream.redTeam || undefined,
-      team2: stream.yellowTeam || undefined,
+      team1,
+      team2,
     };
-    const title = stream.title?.trim() ? stream.title.trim() : undefined;
-    const description = stream.description?.trim() ? stream.description.trim() : undefined;
+    const draftTitle = (draftTitlesRef.current[key] || stream.title).trim();
+    const draftDescription = (draftDescriptionsRef.current[key] || stream.description).trim();
+    const title = draftTitle ? draftTitle : undefined;
+    const description = draftDescription ? draftDescription : undefined;
 
     const record = await apiClient.createBroadcast({
       title,
@@ -723,7 +911,7 @@ export const MonitorManager = () => {
       const applyRunningJob = async (jobId?: string) => {
         if (!jobId) return;
         if (!autoStopChecked) {
-          await apiClient.updateJobMetadata(jobId, { autoStopEnabled: false, autoStopAt: null, autoStopMinutes: null });
+          await apiClient.updateJobMetadata(jobId, { autoStopEnabled: false, autoStopAt: undefined, autoStopMinutes: undefined });
         } else {
           const autoStopAt = new Date(Date.now() + totalMinutes * 60 * 1000).toISOString();
           await apiClient.updateJobMetadata(jobId, { autoStopEnabled: true, autoStopAt, autoStopMinutes: totalMinutes });
@@ -770,6 +958,17 @@ export const MonitorManager = () => {
 
 
   const scheduleYouTubeUpdate = (key: StreamKey, updates: { title?: string; description?: string }) => {
+    const streamMap = streamsWithJobsRef.current;
+    const selectedBroadcastId = broadcastSelectionRef.current[key];
+    const stream = streamMap ? streamMap[key] : undefined;
+    const stoppedStatuses = new Set(['STOPPED', 'FAILED', 'CANCELED', 'DISMISSED', 'UNKNOWN']);
+    const hasActiveJob = !!(stream?.jobId && (!stream.jobStatus || !stoppedStatuses.has(stream.jobStatus)));
+    const hasBroadcastSelection = !!(selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE);
+
+    if (!hasActiveJob && !hasBroadcastSelection) {
+      return;
+    }
+
     pendingYoutubeUpdatesRef.current[key] = {
       ...pendingYoutubeUpdatesRef.current[key],
       ...updates,
@@ -779,10 +978,15 @@ export const MonitorManager = () => {
       clearTimeout(youtubeUpdateTimersRef.current[key]!);
     }
 
-    setYoutubeUpdateState(prev => ({
-      ...prev,
-      [key]: { pending: true },
-    }));
+    setYoutubeUpdateState(prev => {
+      if (prev[key]?.pending) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [key]: { pending: true },
+      };
+    });
 
     youtubeUpdateTimersRef.current[key] = setTimeout(async () => {
       const pending = pendingYoutubeUpdatesRef.current[key];
@@ -795,9 +999,11 @@ export const MonitorManager = () => {
       }
       const stream = streamMap[key];
       const selectedBroadcastId = broadcastSelectionRef.current[key];
+      const runningStatuses = new Set(['RUNNING', 'STARTING']);
+      const canUpdateJob = !!(stream.jobId && stream.jobStatus && runningStatuses.has(stream.jobStatus));
 
       try {
-        if (stream.jobId) {
+        if (canUpdateJob && stream.jobId) {
           await apiClient.updateJobMetadata(stream.jobId, pending);
         } else if (selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE) {
           const updated = await apiClient.updateBroadcastMetadata(selectedBroadcastId, pending);
@@ -829,16 +1035,17 @@ export const MonitorManager = () => {
   };
 
   const updateTitle = async (key: StreamKey, title: string) => {
-    const stream = streamsWithJobs[key];
     const selectedBroadcastId = broadcastSelection[key];
+    const stream = streamsWithJobs[key];
+    const hasBroadcastSelection = !!(selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE);
     
     // Mark that we just updated this stream (to prevent cursor jumps from syncing)
     lastUpdateTimeRef.current[key] = Date.now();
     
     // Always update local state immediately for responsive UI
-    setStreams(prev => ({ ...prev, [key]: { ...prev[key], title } }));
+    draftTitlesRef.current[key] = title;
 
-    if (stream.jobId || (selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE)) {
+    if (stream.jobId || hasBroadcastSelection) {
       scheduleYouTubeUpdate(key, { title });
     }
   };
@@ -861,16 +1068,17 @@ export const MonitorManager = () => {
   };
 
   const updateDescription = async (key: StreamKey, description: string) => {
-    const stream = streamsWithJobs[key];
     const selectedBroadcastId = broadcastSelection[key];
+    const stream = streamsWithJobs[key];
+    const hasBroadcastSelection = !!(selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE);
     
     // Mark that we just updated this stream (to prevent cursor jumps from syncing)
     lastUpdateTimeRef.current[key] = Date.now();
     
     // Always update local state immediately for responsive UI
-    setStreams(prev => ({ ...prev, [key]: { ...prev[key], description } }));
+    draftDescriptionsRef.current[key] = description;
 
-    if (stream.jobId || (selectedBroadcastId && selectedBroadcastId !== NEW_BROADCAST_VALUE)) {
+    if (stream.jobId || hasBroadcastSelection) {
       scheduleYouTubeUpdate(key, { description });
     }
   };
@@ -3098,8 +3306,16 @@ export const MonitorManager = () => {
                           </div>
                         )}
                         {showCountdown && (
-                          <div className="mt-1 text-xs text-blue-700">
-                            Broadcast set to begin in {toCountdown(countdownMs!)}
+                          <div className="mt-1 text-xs text-blue-700 flex items-center gap-2">
+                            <span>Broadcast set to begin in {toCountdown(countdownMs!)}</span>
+                            {autoStartEnabled && selectedBroadcast?.broadcastId && (
+                              <button
+                                className="text-xs text-blue-600 hover:text-blue-700 underline"
+                                onClick={() => cancelAutoStart(selectedBroadcast.broadcastId)}
+                              >
+                                cancel
+                              </button>
+                            )}
                           </div>
                         )}
                         {s.isLive && s.autoStopAt && (
@@ -3209,6 +3425,14 @@ export const MonitorManager = () => {
                             {s.isPaused ? 'Unpause' : 'Pause'}
                           </button>
                         )}
+                        {!s.isLive && (
+                          <button
+                            className="btn btn-secondary text-sm px-4 py-2"
+                            onClick={() => clearStreamCard(key)}
+                          >
+                            Clear
+                          </button>
+                        )}
                       </div>
                       <div className="grid grid-cols-1 gap-2">
                         <div className="flex flex-col">
@@ -3224,6 +3448,8 @@ export const MonitorManager = () => {
                                   ...prev,
                                   [key]: { ...prev[key], title: '', description: '' },
                                 }));
+                                draftTitlesRef.current[key] = '';
+                                draftDescriptionsRef.current[key] = '';
                                 return;
                               }
                               if (nextId) {
@@ -3238,6 +3464,8 @@ export const MonitorManager = () => {
                                       description: refreshed.description ?? prev[key].description,
                                     },
                                   }));
+                                  draftTitlesRef.current[key] = refreshed.title ?? '';
+                                  draftDescriptionsRef.current[key] = refreshed.description ?? '';
                                 } catch (error: any) {
                                   setError(`Failed to refresh broadcast: ${error.message}`);
                                 }
@@ -3283,20 +3511,21 @@ export const MonitorManager = () => {
                         </div>
                         <div className="flex flex-col">
                           <label className="text-sm font-medium text-gray-700 mb-1">Title</label>
-                          <input 
-                            className="px-3 py-2 border border-gray-300 rounded-md" 
-                            placeholder="<Autogenerated>" 
-                            value={s.title}
-                            onChange={e => updateTitle(key, e.target.value)} 
+                          <StreamTextField
+                            className="px-3 py-2 border border-gray-300 rounded-md"
+                            placeholder="<Autogenerated>"
+                            value={s.title ?? ''}
+                            onChange={value => updateTitle(key, value)}
                           />
                         </div>
                         <div className="flex flex-col">
                           <label className="text-sm font-medium text-gray-700 mb-1">Description</label>
-                          <textarea 
-                            className="px-3 py-2 border border-gray-300 rounded-md min-h-[84px]" 
-                            placeholder="<Autogenerated>" 
-                            value={s.description}
-                            onChange={e => updateDescription(key, e.target.value)} 
+                          <StreamTextField
+                            className="px-3 py-2 border border-gray-300 rounded-md min-h-[84px]"
+                            placeholder="<Autogenerated>"
+                            value={s.description ?? ''}
+                            onChange={value => updateDescription(key, value)}
+                            isTextarea
                           />
                         </div>
                         {key !== 'vibe' && (
