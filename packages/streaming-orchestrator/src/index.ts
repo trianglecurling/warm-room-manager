@@ -2124,10 +2124,10 @@ app.post<{ Params: { id: string } }>("/v1/jobs/:id/stop", async (req, reply) => 
 	}
 	const targets = Array.from(agents.values()).filter((a) => a.currentJobId === job.id && a.ws && a.state !== "OFFLINE");
 	if (targets.length === 0) {
-		const agent = agents.get(job.agentId);
-		if (!agent || agent.state === "OFFLINE" || !agent.ws) {
-			updateJob(job.id, { status: "UNKNOWN" });
-			return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
+	const agent = agents.get(job.agentId);
+	if (!agent || agent.state === "OFFLINE" || !agent.ws) {
+		updateJob(job.id, { status: "UNKNOWN" });
+		return reply.code(202).send({ ok: true, job: jobs.get(job.id) });
 		}
 		targets.push(agent);
 	}
@@ -2814,30 +2814,30 @@ wssAgents.on("connection", (ws, req) => {
 						}
 						emitJobEvent(jobId, "stream.restart_ready", "Stream restart queued");
 					} else {
-						// Clear title and description when stream stops so they can be auto-generated next time
-						const clearedMetadata = j.streamMetadata ? {
-							...j.streamMetadata,
-							title: '',
-							description: '',
-						} : undefined;
+					// Clear title and description when stream stops so they can be auto-generated next time
+					const clearedMetadata = j.streamMetadata ? {
+						...j.streamMetadata,
+						title: '',
+						description: '',
+					} : undefined;
 
-						updateJob(jobId, {
-							status,
-							endedAt: new Date().toISOString(),
-							error: error ?? null,
-							streamMetadata: clearedMetadata,
-						});
+					updateJob(jobId, {
+						status,
+						endedAt: new Date().toISOString(),
+						error: error ?? null,
+						streamMetadata: clearedMetadata,
+					});
 						void endBroadcastForJob(j, "job stopped");
 						emitJobEvent(jobId, "stream.stopped", "Stream stopped", { status, error });
 						streamHealth.delete(jobId);
 						pendingRestarts.delete(jobId);
 
-						// Cancel any pending YouTube updates for this job
-						const pending = pendingYouTubeUpdates.get(jobId);
-						if (pending) {
-							clearTimeout(pending.timer);
-							pendingYouTubeUpdates.delete(jobId);
-							console.log(`Cancelled pending YouTube update for stopped job ${jobId}`);
+					// Cancel any pending YouTube updates for this job
+					const pending = pendingYouTubeUpdates.get(jobId);
+					if (pending) {
+						clearTimeout(pending.timer);
+						pendingYouTubeUpdates.delete(jobId);
+						console.log(`Cancelled pending YouTube update for stopped job ${jobId}`);
 						}
 					}
 				}
