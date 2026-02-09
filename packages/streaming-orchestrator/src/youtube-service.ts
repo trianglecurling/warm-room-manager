@@ -463,6 +463,10 @@ export class YouTubeService {
 				id: [broadcastId],
 			});
 			const broadcast = response.data.items?.[0];
+			// Broadcast no longer in YouTube (deleted or ended and removed from list) → treat as complete so refresh-all can remove it
+			if (!broadcast) {
+				return { lifeCycleStatus: 'complete', actualEndTime: undefined };
+			}
 			return {
 				lifeCycleStatus: (broadcast?.status as any)?.lifeCycleStatus,
 				actualEndTime: (broadcast?.status as any)?.actualEndTime,

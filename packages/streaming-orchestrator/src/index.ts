@@ -542,7 +542,6 @@ async function endBroadcastForJob(job: Job, reason: string) {
 	try {
 		const result = await youtubeService.endOrDeleteBroadcast(broadcastId);
 		console.log(`✅ Ended YouTube broadcast for job ${job.id}. Result: ${result}. Reason: ${reason}`);
-		removeBroadcast(broadcastId);
 		emitJobEvent(job.id, "broadcast.completed", "YouTube broadcast completed", { reason, broadcastId });
 	} catch (error) {
 		console.error(`❌ Failed to end YouTube broadcast for job ${job.id}:`, error);
@@ -551,6 +550,9 @@ async function endBroadcastForJob(job: Job, reason: string) {
 			broadcastId,
 			error: error instanceof Error ? error.message : String(error),
 		});
+	} finally {
+		// Always remove from our store when the job ends so the UI list stays in sync (even if YouTube end failed)
+		removeBroadcast(broadcastId);
 	}
 }
 
@@ -1648,6 +1650,23 @@ app.get("/v1/broadcasts", async () => {
 app.post("/v1/broadcasts/refresh-all", async (_req, reply) => {
 	try {
 		const records = listBroadcasts();
+
+		if (process.env.DISABLE_YOUTUBE_API === 'true') {
+			// No YouTube API: remove broadcasts that have an associated job in a terminal state (stream was stopped in-app)
+			const terminalStatuses = ['STOPPED', 'FAILED', 'DISMISSED', 'CANCELED'];
+			for (const record of records) {
+				const hasEndedJob = Array.from(jobs.values()).some(
+					(j) =>
+						j.streamMetadata?.youtube?.broadcastId === record.broadcastId &&
+						terminalStatuses.includes(j.status)
+				);
+				if (hasEndedJob) {
+					removeBroadcast(record.broadcastId);
+				}
+			}
+			return reply.code(200).send(listBroadcasts());
+		}
+
 		const results = await Promise.allSettled(
 			records.map(async (record) => {
 				const lifecycle = await youtubeService.getBroadcastLifecycle(record.broadcastId);
