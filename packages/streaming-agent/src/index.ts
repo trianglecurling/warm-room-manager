@@ -28,6 +28,40 @@ let obsManager: OBSManager | null = null;
 let isConnecting = false; // Prevent multiple simultaneous connection attempts
 let currentStreamConfig: { streamUrl: string; streamKey: string } | null = null;
 let isPaused = false;
+let streamFailureReported = false; // Guard against duplicate failure reports
+
+async function onStreamFailure(jobId: string, reason: 'obs' | 'ffmpeg') {
+	if (currentJobId !== jobId || streamFailureReported) return;
+	streamFailureReported = true;
+
+	const errorCode = reason === 'obs' ? 'OBS_CRASHED' : 'FFMPEG_EXITED';
+	console.error(`🚨 Stream failure detected (${reason}) for job ${jobId} - reporting for auto-recovery`);
+
+	try {
+		// Clean up without full stopStreaming (which would clear onStreamFailure - already done by OBS)
+		if (obsManager) {
+			try {
+				await obsManager.stopFFmpegStream();
+			} catch (e) {
+				console.warn('Error stopping FFmpeg during failure cleanup:', e);
+			}
+		}
+	} finally {
+		currentJobId = null;
+		currentStreamConfig = null;
+		isPaused = false;
+		state = "IDLE";
+
+		send(Msg.AgentJobStopped, {
+			jobId,
+			status: "FAILED" as const,
+			error: {
+				code: errorCode,
+				message: reason === 'obs' ? 'OBS exited unexpectedly' : 'FFmpeg exited unexpectedly'
+			}
+		});
+	}
+}
 
 function connect() {
 	// Prevent multiple simultaneous connection attempts
@@ -226,6 +260,7 @@ async function startStreamingJob(jobId: string, config: any, streamMetadata?: St
 			streamKey: streamMetadata.youtube.streamKey,
 		};
 		isPaused = false;
+		streamFailureReported = false;
 
 		// Determine scene name from stream key
 		let sceneName = 'SheetA'; // Default scene
@@ -264,10 +299,14 @@ async function startStreamingJob(jobId: string, config: any, streamMetadata?: St
 		console.log('🎬 Final scene name:', sceneName);
 
 		// Start streaming to YouTube (OBS will be started automatically with correct scene)
-		await obsManager.startStreaming({
-			streamUrl: streamMetadata.youtube.streamUrl,
-			streamKey: streamMetadata.youtube.streamKey
-		}, sceneName);
+		await obsManager.startStreaming(
+			{
+				streamUrl: streamMetadata.youtube.streamUrl,
+				streamKey: streamMetadata.youtube.streamKey
+			},
+			sceneName,
+			(reason) => onStreamFailure(jobId, reason)
+		);
 
 		console.log(`Streaming job ${jobId} started successfully (OBS Virtual Camera + FFmpeg)`);
 		state = "RUNNING";
@@ -300,6 +339,7 @@ async function stopStreamingJob(jobId: string, reason?: string) {
 		isPaused = false;
 		currentStreamConfig = null;
 		currentJobId = null;
+		streamFailureReported = false;
 		state = "IDLE";
 		send(Msg.AgentJobStopped, { jobId, status: "STOPPED" as const });
 

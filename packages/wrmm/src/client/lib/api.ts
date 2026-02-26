@@ -787,7 +787,10 @@ class ApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code }),
     });
-    if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to exchange OAuth code'));
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error((data as { error?: string }).error || await res.text().catch(() => 'Failed to exchange OAuth code'));
+    }
     return res.json();
   }
 
@@ -824,6 +827,24 @@ class ApiClient {
       body: JSON.stringify({ alternateColors })
     });
     if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to update alternate colors'));
+    return res.json();
+  }
+
+  async getAllowAllYoutubeAccounts(): Promise<{ allowAllYoutubeAccounts: boolean }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/config/allow-all-youtube-accounts`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to get allow-all-youtube-accounts setting`);
+    return res.json();
+  }
+
+  async updateAllowAllYoutubeAccounts(allowAllYoutubeAccounts: boolean): Promise<{ success: boolean; allowAllYoutubeAccounts: boolean }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/config/allow-all-youtube-accounts`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allowAllYoutubeAccounts })
+    });
+    if (!res.ok) throw new Error(`Failed to update allow-all-youtube-accounts setting`);
     return res.json();
   }
 

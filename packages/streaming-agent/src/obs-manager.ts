@@ -12,11 +12,15 @@ export interface StreamConfig {
 	streamKey: string;
 }
 
+export type StreamFailureReason = 'obs' | 'ffmpeg';
+
 export class OBSManager {
 	private obs: OBSWebSocket;
 	private ffmpegProcess: ChildProcess | null = null;
 	private isConnected = false;
 	private currentScene = 'SheetA';
+	/** Called when OBS or FFmpeg fails unexpectedly during active streaming. Cleared on stopStreaming. */
+	private onStreamFailure?: (reason: StreamFailureReason) => void;
 
 	/**
 	 * Get the correct audio source for the current scene
@@ -61,6 +65,11 @@ export class OBSManager {
 		this.obs.on('ConnectionClosed', () => {
 			console.log('OBS WebSocket disconnected');
 			this.isConnected = false;
+			// If we're actively streaming, OBS crash/disconnect is a recoverable failure
+			if (this.onStreamFailure) {
+				console.warn('🚨 OBS disconnected during stream - triggering recovery');
+				this.onStreamFailure('obs');
+			}
 		});
 
 		this.obs.on('ConnectionError', (error) => {
@@ -206,7 +215,12 @@ export class OBSManager {
 		}
 	}
 
-	async startStreaming(streamConfig: StreamConfig, sceneName = 'SheetA'): Promise<void> {
+	async startStreaming(
+		streamConfig: StreamConfig,
+		sceneName = 'SheetA',
+		onFailure?: (reason: StreamFailureReason) => void
+	): Promise<void> {
+		this.onStreamFailure = onFailure;
 		try {
 			// Start OBS if not already running, with the correct scene
 			if (!this.isConnected) {
@@ -249,6 +263,7 @@ export class OBSManager {
 	}
 
 	async stopStreaming(): Promise<void> {
+		this.onStreamFailure = undefined; // Prevent failure callbacks during intentional stop
 		try {
 			// First stop FFmpeg streaming
 			await this.stopFFmpegStream();
@@ -427,7 +442,12 @@ export class OBSManager {
 			console.log(`FFmpeg process exited with code ${code}`);
 			if (code !== 0 && code !== null) {
 				console.warn(`⚠️  FFmpeg exited unexpectedly with code ${code}`);
-				console.warn('This usually indicates a device access issue');
+				console.warn('This usually indicates a device access issue (e.g. OBS crashed)');
+				// Trigger recovery when FFmpeg dies unexpectedly during stream
+				if (this.onStreamFailure) {
+					console.warn('🚨 FFmpeg crashed during stream - triggering recovery');
+					this.onStreamFailure('ffmpeg');
+				}
 			}
 			this.ffmpegProcess = null;
 		});

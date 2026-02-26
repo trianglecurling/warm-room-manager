@@ -71,6 +71,8 @@ orchestrator.start();
 | `YOUTUBE_CLIENT_ID` | - | YouTube OAuth2 Client ID (optional) |
 | `YOUTUBE_CLIENT_SECRET` | - | YouTube OAuth2 Client Secret (optional) |
 | `YOUTUBE_REFRESH_TOKEN` | - | YouTube OAuth2 Refresh Token (optional) |
+| `ALLOWED_YOUTUBE_CHANNEL_ID` | - | Only this channel can connect when channel restriction is enabled (e.g. `UCxxxxxxxx`) |
+| `ALLOW_ALL_YOUTUBE_ACCOUNTS` | `false` | When `true`, any YouTube account can connect (override, also settable in Secret Configuration) |
 | `AGENT_SSH_USER` | `Administrator` | SSH username for agent reboots (same for all agents) |
 | `AGENT_KEY_PATH` | - | Path to SSH private key file on orchestrator machine (optional) |
 | `AGENT_REBOOT_COMMAND` | `shutdown /r /f /t 0` | Windows reboot command (same for all agents) |
@@ -107,6 +109,8 @@ The orchestrator includes optional YouTube API integration for automatic live st
 - ✅ **Industry standard** - widely used and well-supported
 
 **Note:** YouTube API does not support Service Accounts. OAuth2 with refresh tokens is the correct approach for long-term server access.
+
+**Channel restriction:** By default, only the channel specified in `ALLOWED_YOUTUBE_CHANNEL_ID` can connect. This prevents streaming to the wrong channel. To find your channel ID: go to your YouTube channel page, view source, and search for `channel_id` or `externalId`, or use the [YouTube Data API](https://developers.google.com/youtube/v3/getting-started#channels). You can override this in Secret Configuration → "Allow any YouTube account".
 
 1. **Create OAuth2 Credentials**:
    - Go to [Google Cloud Console](https://console.cloud.google.com/)

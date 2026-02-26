@@ -21,6 +21,9 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [agents, setAgents] = useState<OrchestratorAgent[]>([]);
   const [loadingAgents, setLoadingAgents] = useState(true);
+  const [allowAllYoutubeAccounts, setAllowAllYoutubeAccounts] = useState(false);
+  const [loadingAllowAll, setLoadingAllowAll] = useState(true);
+  const [updatingAllowAll, setUpdatingAllowAll] = useState(false);
 
   // Load saved setting on mount
   useEffect(() => {
@@ -60,6 +63,22 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
     loadAgents();
   }, []);
 
+  // Load allow-all-youtube-accounts on mount
+  useEffect(() => {
+    const loadAllowAll = async () => {
+      setLoadingAllowAll(true);
+      try {
+        const data = await apiClient.getAllowAllYoutubeAccounts();
+        setAllowAllYoutubeAccounts(data.allowAllYoutubeAccounts);
+      } catch (e: any) {
+        console.error('Failed to load allow-all-youtube-accounts:', e);
+      } finally {
+        setLoadingAllowAll(false);
+      }
+    };
+    loadAllowAll();
+  }, []);
+
   const disconnectOAuth = async () => {
     setIsDisconnecting(true);
     try {
@@ -96,6 +115,20 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
       onClose();
+    }
+  };
+
+  const handleAllowAllYoutubeAccountsChange = async (value: boolean) => {
+    setUpdatingAllowAll(true);
+    setError(null);
+    try {
+      await apiClient.updateAllowAllYoutubeAccounts(value);
+      setAllowAllYoutubeAccounts(value);
+    } catch (err) {
+      setError('Failed to update allow-all-youtube-accounts setting');
+      console.error('Failed to update allow-all-youtube-accounts:', err);
+    } finally {
+      setUpdatingAllowAll(false);
     }
   };
 
@@ -186,6 +219,29 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
                     {isDisconnecting ? 'Disconnecting...' : 'Disconnect YouTube'}
                   </button>
                 )}
+
+                <div className="border-t border-gray-100 pt-3 mt-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={allowAllYoutubeAccounts}
+                      onChange={(e) => handleAllowAllYoutubeAccountsChange(e.target.checked)}
+                      disabled={loadingAllowAll || updatingAllowAll}
+                      className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50"
+                    />
+                    <span className="text-sm text-gray-700">
+                      Allow any YouTube account
+                    </span>
+                  </label>
+                  <p className="mt-1 text-xs text-gray-500">
+                    When enabled, any account can connect. When disabled, only the channel in ALLOWED_YOUTUBE_CHANNEL_ID can connect.
+                  </p>
+                  {(loadingAllowAll || updatingAllowAll) && (
+                    <p className="mt-1 text-xs text-blue-600">
+                      {updatingAllowAll ? 'Updating...' : 'Loading...'}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </div>

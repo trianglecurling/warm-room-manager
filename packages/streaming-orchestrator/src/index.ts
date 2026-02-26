@@ -22,9 +22,12 @@ const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS ?? 3000);
 const HEARTBEAT_TIMEOUT_MS = Number(process.env.HEARTBEAT_TIMEOUT_MS ?? 10000);
 const STOP_GRACE_MS = Number(process.env.STOP_GRACE_MS ?? 10000);
 const KILL_AFTER_MS = Number(process.env.KILL_AFTER_MS ?? 5000);
-const STREAM_HEALTH_INTERVAL_MS = Number(process.env.STREAM_HEALTH_INTERVAL_MS ?? 15000);
+const STREAM_HEALTH_INTERVAL_MS = Number(process.env.STREAM_HEALTH_INTERVAL_MS ?? 60000);
 const STREAM_INACTIVE_GRACE_MS = Number(process.env.STREAM_INACTIVE_GRACE_MS ?? 30000);
 const STREAM_RESTART_BACKOFFS_MS = [5000, 15000, 45000];
+
+/** Error codes that trigger automatic stream restart (e.g. OBS/FFmpeg crash) */
+const RECOVERABLE_STREAM_ERROR_CODES = new Set(['OBS_CRASHED', 'FFMPEG_EXITED']);
 
 // Security: Enable IP-based access control to restrict public access
 // Set to true in production to only allow /status and /status-ws from external IPs
@@ -35,6 +38,9 @@ let currentStreamPrivacy: 'public' | 'unlisted' = (process.env.YOUTUBE_STREAM_PR
 
 // In-memory alternate colors setting (not persisted)
 let useAlternateColors = true;
+
+// When false, only the channel in ALLOWED_YOUTUBE_CHANNEL_ID can connect. When true, any account can connect.
+let allowAllYoutubeAccounts = process.env.ALLOW_ALL_YOUTUBE_ACCOUNTS === 'true';
 
 /**
  * Security: IP-based access control helpers
@@ -1296,18 +1302,18 @@ app.get("/oauth/auth-url", async () => {
 	return { authUrl };
 });
 
-app.post("/oauth/token", async (req) => {
+app.post("/oauth/token", async (req, reply) => {
 	const { code } = req.body as { code: string };
 
 	if (!code) {
-		throw new Error('Authorization code is required');
+		return reply.code(400).send({ error: 'Authorization code is required' });
 	}
 
 	const CLIENT_ID = process.env.YOUTUBE_CLIENT_ID;
 	const CLIENT_SECRET = process.env.YOUTUBE_CLIENT_SECRET;
 
 	if (!CLIENT_ID || !CLIENT_SECRET) {
-		throw new Error('YouTube OAuth2 credentials not configured');
+		return reply.code(500).send({ error: 'YouTube OAuth2 credentials not configured' });
 	}
 
 	const oauth2Client = new google.auth.OAuth2(
@@ -1319,6 +1325,23 @@ app.post("/oauth/token", async (req) => {
 	try {
 		const { tokens } = await oauth2Client.getToken(code);
 		oauth2Client.setCredentials(tokens);
+
+		// Verify channel is allowed (unless override is enabled)
+		if (!allowAllYoutubeAccounts) {
+			const allowedChannelId = process.env.ALLOWED_YOUTUBE_CHANNEL_ID?.trim();
+			if (!allowedChannelId) {
+				return reply.code(400).send({ error: 'ALLOWED_YOUTUBE_CHANNEL_ID is not configured. Set it in .env or enable "Allow any YouTube account" in Secret Configuration.' });
+			}
+			const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+			const channelsResp = await youtube.channels.list({ part: ['id'], mine: true });
+			const channelId = channelsResp.data.items?.[0]?.id;
+			if (!channelId) {
+				return reply.code(400).send({ error: 'Could not determine YouTube channel for authenticated account.' });
+			}
+			if (channelId !== allowedChannelId) {
+				return reply.code(403).send({ error: `This YouTube account (channel ${channelId}) is not authorized. Only channel ${allowedChannelId} is allowed. Enable "Allow any YouTube account" in Secret Configuration to override.` });
+			}
+		}
 
 		// Update environment variable in-memory
 		if (tokens.refresh_token) {
@@ -1378,7 +1401,8 @@ app.post("/oauth/token", async (req) => {
 			refreshToken: tokens.refresh_token ? 'updated' : 'not_provided'
 		};
 	} catch (error) {
-		throw new Error(`Failed to exchange authorization code: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		const msg = error instanceof Error ? error.message : 'Unknown error';
+		return reply.code(400).send({ error: `Failed to exchange authorization code: ${msg}` });
 	}
 });
 
@@ -1421,6 +1445,19 @@ app.put<{ Body: { alternateColors: boolean } }>("/v1/config/alternate-colors", a
 	broadcastColorModeUpdate(alternateColors);
 
 	return { success: true, alternateColors };
+});
+
+app.get("/v1/config/allow-all-youtube-accounts", async () => {
+	return { allowAllYoutubeAccounts };
+});
+
+app.put<{ Body: { allowAllYoutubeAccounts: boolean } }>("/v1/config/allow-all-youtube-accounts", async (req, reply) => {
+	const { allowAllYoutubeAccounts: value } = req.body;
+	if (typeof value !== 'boolean') {
+		return reply.code(400).send({ error: 'Invalid allowAllYoutubeAccounts setting. Must be a boolean' });
+	}
+	allowAllYoutubeAccounts = value;
+	return { success: true, allowAllYoutubeAccounts };
 });
 
 app.get("/oauth/callback", async (req, reply) => {
@@ -2815,6 +2852,65 @@ wssAgents.on("connection", (ws, req) => {
 						break;
 					}
 
+					// Recoverable failure (OBS/FFmpeg crash): requeue for restart without ending broadcast
+					if (status === "FAILED" && error?.code && RECOVERABLE_STREAM_ERROR_CODES.has(error.code)) {
+						const health = streamHealth.get(jobId) ?? { attempts: 0 };
+						health.attempts += 1;
+
+						if (health.attempts > STREAM_RESTART_BACKOFFS_MS.length) {
+							// Exhausted recovery attempts - fail the job
+							updateJob(jobId, {
+								status: "FAILED",
+								endedAt: new Date().toISOString(),
+								error: {
+									code: "STREAM_RESTART_EXCEEDED",
+									message: `OBS/FFmpeg crash recovery exhausted after ${health.attempts} attempts`,
+								},
+							});
+							void endBroadcastForJob(j, "OBS/FFmpeg crash recovery exhausted");
+							emitJobEvent(jobId, "stream.restart_exhausted", "OBS/FFmpeg crash recovery exhausted", {
+								attempts: health.attempts,
+								errorCode: error.code,
+							});
+							streamHealth.delete(jobId);
+						} else {
+							// Requeue for restart after backoff (gives OBS time to fully exit)
+							health.firstInactiveAt = undefined;
+							health.nextRestartAt = undefined;
+							streamHealth.set(jobId, health);
+							const backoffMs = STREAM_RESTART_BACKOFFS_MS[Math.min(health.attempts - 1, STREAM_RESTART_BACKOFFS_MS.length - 1)] ?? 5000;
+							const streamMeta = j.streamMetadata;
+							emitJobEvent(jobId, "stream.restart_requested", "OBS/FFmpeg crash - restart scheduled", {
+								errorCode: error.code,
+								message: error.message,
+								attempt: health.attempts,
+								backoffMs,
+							});
+							setTimeout(() => {
+								const job = jobs.get(jobId);
+								if (job && job.status !== "PENDING" && !["STOPPED", "FAILED", "CANCELED", "DISMISSED"].includes(job.status)) {
+									updateJob(jobId, {
+										status: "PENDING",
+										agentId: null,
+										startedAt: null,
+										endedAt: null,
+										error: null,
+										streamMetadata: streamMeta ? { ...streamMeta, isPaused: false } : undefined,
+									});
+									emitJobEvent(jobId, "stream.restart_ready", "Stream restart queued (OBS/FFmpeg crash)", {
+										errorCode: error.code,
+										attempt: health.attempts,
+									});
+								}
+							}, backoffMs);
+						}
+						if (agent.currentJobId === jobId) {
+							agent.currentJobId = null;
+							setAgentState(agent, agent.drain ? "DRAINING" : "IDLE");
+						}
+						break;
+					}
+
 					if (pendingRestarts.has(jobId)) {
 						pendingRestarts.delete(jobId);
 						updateJob(jobId, {
@@ -3052,19 +3148,31 @@ async function monitorStreamHealth() {
 		const now = Date.now();
 		const candidates = Array.from(jobs.values()).filter((j) => j.status === "RUNNING");
 
-		for (const job of candidates) {
-			const youtube = job.streamMetadata?.youtube;
-			if (!youtube?.broadcastId || !youtube?.streamId) continue;
-			if (job.streamMetadata?.isPaused) continue;
-			if (pendingRestarts.has(job.id)) continue;
+		// Skip when idle - no API calls when no streams are running
+		if (candidates.length === 0) return;
 
-			let status;
-			try {
-				status = await youtubeService.getBroadcastAndStreamStatus(youtube.broadcastId, youtube.streamId);
-			} catch (error) {
-				console.error(`Stream health check failed for job ${job.id}:`, error);
-				continue;
-			}
+		const pairs = candidates
+			.filter((j) => {
+				const youtube = j.streamMetadata?.youtube;
+				return youtube?.broadcastId && youtube?.streamId && !j.streamMetadata?.isPaused && !pendingRestarts.has(j.id);
+			})
+			.map((j) => ({ broadcastId: j.streamMetadata!.youtube!.broadcastId!, streamId: j.streamMetadata!.youtube!.streamId!, job: j }));
+
+		if (pairs.length === 0) return;
+
+		let statusMap: Map<string, { lifeCycleStatus?: string; actualEndTime?: string; streamStatus?: string; concurrentViewers?: number }>;
+		try {
+			statusMap = await youtubeService.getBroadcastAndStreamStatusBatch(
+				pairs.map((p) => ({ broadcastId: p.broadcastId, streamId: p.streamId }))
+			);
+		} catch (error) {
+			console.error('Stream health check failed:', error);
+			return;
+		}
+
+		for (const { broadcastId, job } of pairs) {
+			const status = statusMap.get(broadcastId);
+			if (!status) continue;
 
 			const lifeCycleStatus = status.lifeCycleStatus;
 			const streamStatus = status.streamStatus;
@@ -3318,6 +3426,19 @@ setInterval(() => {
 
 setInterval(() => {
 	void processAutoStopJobs();
+}, 5000);
+
+// Refresh YouTube OAuth access token every hour to keep it fresh and detect when refresh token expires
+const YOUTUBE_TOKEN_REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+setInterval(async () => {
+	const ok = await youtubeService.refreshAccessToken();
+	if (!ok) {
+		console.warn('⚠️  YouTube refresh token appears expired. Please reconnect via OAuth.');
+	}
+}, YOUTUBE_TOKEN_REFRESH_INTERVAL_MS);
+// Run once shortly after startup
+setTimeout(async () => {
+	await youtubeService.refreshAccessToken();
 }, 5000);
 
 /**

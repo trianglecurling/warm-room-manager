@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, memo } from 'react';
+import { useState, useMemo, useEffect, useRef, memo, useCallback } from 'react';
 import { ArrowsUpDownIcon, ArrowsRightLeftIcon, PlusCircleIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { ExclamationTriangleIcon as ExclamationSolidIcon, CheckCircleIcon as CheckSolidIcon, PencilSquareIcon } from '@heroicons/react/24/solid';
 import logo from '../assets/logo.png';
@@ -12,6 +12,7 @@ import { TeamSaveModal } from './TeamSaveModal';
 import { TimerManager } from './TimerManager';
 import { useQueryClient } from '@tanstack/react-query';
 import { useOrchestrator } from '../hooks/useOrchestrator';
+import { useOAuthStatus } from '../hooks/useOAuthStatus';
 import { YouTubeOAuthPanel } from './YouTubeOAuthPanel';
 import { SecretConfigModal } from './SecretConfigModal';
 import { StreamStartCountdownModal } from './StreamStartCountdownModal';
@@ -237,6 +238,28 @@ export const MonitorManager = () => {
 
   // Use orchestrator hook for real-time data
   const { agents: orchestratorAgents, jobs: orchestratorJobs, restartEvents, isConnected: orchestratorConnected } = useOrchestrator();
+  const { data: oauthStatus } = useOAuthStatus();
+  const youtubeOAuthConnected = oauthStatus?.tokenStatus === 'valid';
+  const YOUTUBE_AUTHORIZED_USERS = ['Trevor Gau', 'Drew Tingen', 'John Studders', 'Lance Wright', 'Jeff Kosokoff', 'Stephen Turcol'];
+  const [youtubeLoginWorking, setYoutubeLoginWorking] = useState(false);
+
+  const openYoutubeAuthPopup = useCallback(async () => {
+    setYoutubeLoginWorking(true);
+    try {
+      const { authUrl } = await apiClient.getOAuthAuthUrl();
+      const popup = window.open(authUrl, 'youtube-oauth', 'width=600,height=700,scrollbars=yes,resizable=yes');
+      const timer = setInterval(() => {
+        if (!popup || popup.closed) {
+          clearInterval(timer);
+          queryClient.invalidateQueries({ queryKey: ['oauth', 'status'] });
+          setYoutubeLoginWorking(false);
+        }
+      }, 800);
+    } catch (e) {
+      setYoutubeLoginWorking(false);
+      queryClient.invalidateQueries({ queryKey: ['oauth', 'status'] });
+    }
+  }, [queryClient]);
 
   const restartInfoByJobId = useMemo(() => {
     const map: Record<string, { attempt: number; backoffMs?: number; ts?: string }> = {};
@@ -2979,6 +3002,36 @@ export const MonitorManager = () => {
               <p className="text-center text-gray-500 mt-1">Control multiple streams and monitor agent capacity</p>
             </div>
 
+            {!youtubeOAuthConnected ? (
+              <div className="bg-amber-50 border-2 border-amber-300 rounded-lg p-6 mb-6">
+                <p className="text-lg font-semibold text-amber-900 mb-2">
+                  The stream control manager needs to reconnect to YouTube. Please have someone on the following list log in.
+                </p>
+                <ul className="list-disc list-inside text-gray-800 space-y-1 mb-4">
+                  {YOUTUBE_AUTHORIZED_USERS.map((name) => (
+                    <li key={name}>{name}</li>
+                  ))}
+                </ul>
+                <ol className="list-decimal list-inside text-gray-800 space-y-1 mb-4 text-sm">
+                  <li>Click the Log in button</li>
+                  <li>Sign into your Google Account (probably xxx@trianglecurling.com)</li>
+                  <li>Choose the brand account for &quot;TriangleCurling&quot; (logo with white background)</li>
+                  <li>Advanced &gt; &quot;Go to Triangle Curling Stream Control (unsafe)&quot;</li>
+                  <li>Check all permissions if needed and continue past warning screen.</li>
+                </ol>
+                <p className="text-sm text-gray-700 mb-4">The window should close and we are now connected to YouTube.</p>
+                <button
+                  type="button"
+                  onClick={openYoutubeAuthPopup}
+                  disabled={youtubeLoginWorking || !oauthStatus?.configured}
+                  className="px-4 py-2 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={oauthStatus?.configured ? 'Open YouTube login' : 'Server not configured for YouTube OAuth'}
+                >
+                  {youtubeLoginWorking ? 'Opening...' : 'Log in to YouTube'}
+                </button>
+              </div>
+            ) : (
+              <>
             {/* Context Selection */}
             <div className="bg-white rounded-lg shadow p-4 mb-6">
               <div className="flex items-center justify-between mb-3">
@@ -3558,6 +3611,68 @@ export const MonitorManager = () => {
               })}
             </div>
 
+            {/* Broadcast Management */}
+            <div className="mt-8 bg-white rounded-lg shadow p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold text-gray-900">Broadcast Management</h2>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="btn btn-secondary text-sm px-3 py-2 disabled:opacity-50"
+                    onClick={refreshBroadcasts}
+                    disabled={!orchestratorConnected}
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    className="btn btn-secondary text-sm px-3 py-2 disabled:opacity-50"
+                    onClick={deleteSelectedBroadcasts}
+                    disabled={!orchestratorConnected || selectedBroadcastIds.length === 0}
+                  >
+                    Delete Selected
+                  </button>
+                </div>
+              </div>
+              {!orchestratorConnected ? (
+                <div className="text-xs text-red-600">Orchestrator service not connected</div>
+              ) : broadcasts.length === 0 ? (
+                <div className="text-sm text-gray-500">No stored broadcasts.</div>
+              ) : (
+                <div className="space-y-2">
+                  {broadcasts.map((b) => (
+                    <div key={b.broadcastId} className="flex items-center justify-between border rounded-md px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4"
+                          checked={selectedBroadcastIds.includes(b.broadcastId)}
+                          onChange={() => toggleBroadcastSelection(b.broadcastId)}
+                        />
+                        <div>
+                          <div className="text-sm font-medium text-gray-800">
+                            {b.title || 'Untitled Broadcast'}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {b.scheduledStartTime ? `Scheduled: ${new Date(b.scheduledStartTime).toLocaleString()}` : 'No scheduled start'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        {b.publicUrl && (
+                          <a href={b.publicUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:text-blue-700">Public</a>
+                        )}
+                        {b.adminUrl && (
+                          <a href={b.adminUrl} target="_blank" rel="noreferrer" className="text-gray-700 hover:text-gray-900">Studio</a>
+                        )}
+                        <span className="text-gray-400">{b.broadcastId}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+              </>
+            )}
+
             {/* Agents Status */}
             <div className="mt-8 bg-white rounded-lg shadow p-4">
               <div className="flex items-center justify-between mb-3">
@@ -3679,66 +3794,6 @@ export const MonitorManager = () => {
                   );
                 })}
               </div>
-            </div>
-
-            {/* Broadcast Management */}
-            <div className="mt-8 bg-white rounded-lg shadow p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-lg font-semibold text-gray-900">Broadcast Management</h2>
-                <div className="flex items-center gap-2">
-                  <button
-                    className="btn btn-secondary text-sm px-3 py-2 disabled:opacity-50"
-                    onClick={refreshBroadcasts}
-                    disabled={!orchestratorConnected}
-                  >
-                    Refresh
-                  </button>
-                  <button
-                    className="btn btn-secondary text-sm px-3 py-2 disabled:opacity-50"
-                    onClick={deleteSelectedBroadcasts}
-                    disabled={!orchestratorConnected || selectedBroadcastIds.length === 0}
-                  >
-                    Delete Selected
-                  </button>
-                </div>
-              </div>
-              {!orchestratorConnected ? (
-                <div className="text-xs text-red-600">Orchestrator service not connected</div>
-              ) : broadcasts.length === 0 ? (
-                <div className="text-sm text-gray-500">No stored broadcasts.</div>
-              ) : (
-                <div className="space-y-2">
-                  {broadcasts.map((b) => (
-                    <div key={b.broadcastId} className="flex items-center justify-between border rounded-md px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4"
-                          checked={selectedBroadcastIds.includes(b.broadcastId)}
-                          onChange={() => toggleBroadcastSelection(b.broadcastId)}
-                        />
-                        <div>
-                          <div className="text-sm font-medium text-gray-800">
-                            {b.title || 'Untitled Broadcast'}
-                          </div>
-                          <div className="text-xs text-gray-500">
-                            {b.scheduledStartTime ? `Scheduled: ${new Date(b.scheduledStartTime).toLocaleString()}` : 'No scheduled start'}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 text-xs">
-                        {b.publicUrl && (
-                          <a href={b.publicUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:text-blue-700">Public</a>
-                        )}
-                        {b.adminUrl && (
-                          <a href={b.adminUrl} target="_blank" rel="noreferrer" className="text-gray-700 hover:text-gray-900">Studio</a>
-                        )}
-                        <span className="text-gray-400">{b.broadcastId}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </div>
         </section>

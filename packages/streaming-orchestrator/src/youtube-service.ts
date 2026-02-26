@@ -49,6 +49,25 @@ export class YouTubeService {
 	}
 
 	/**
+	 * Proactively refresh the access token using the refresh token.
+	 * Call periodically (e.g. every hour) to keep the access token fresh and to detect
+	 * when the refresh token has expired.
+	 * @returns true if refresh succeeded, false if refresh token is invalid/expired
+	 */
+	async refreshAccessToken(): Promise<boolean> {
+		if (DISABLE_YOUTUBE_API || !this.oauth2Client) {
+			return false;
+		}
+		try {
+			await this.oauth2Client.getAccessToken();
+			return true;
+		} catch (error) {
+			console.warn('YouTube OAuth2 access token refresh failed (refresh token may be expired):', error instanceof Error ? error.message : error);
+			return false;
+		}
+	}
+
+	/**
 	 * Update the OAuth2 refresh token
 	 * This allows updating credentials without restarting the service
 	 */
@@ -359,45 +378,76 @@ export class YouTubeService {
 		streamStatus?: string;
 		concurrentViewers?: number;
 	}> {
+		const batch = await this.getBroadcastAndStreamStatusBatch([{ broadcastId, streamId }]);
+		return batch.get(broadcastId) ?? {};
+	}
+
+	/**
+	 * Get broadcast + stream status for multiple jobs in a single API call (2 calls total).
+	 * Reduces quota usage when monitoring multiple streams.
+	 */
+	async getBroadcastAndStreamStatusBatch(
+		pairs: Array<{ broadcastId: string; streamId: string }>
+	): Promise<Map<string, { lifeCycleStatus?: string; actualEndTime?: string; streamStatus?: string; concurrentViewers?: number }>> {
+		const result = new Map<string, { lifeCycleStatus?: string; actualEndTime?: string; streamStatus?: string; concurrentViewers?: number }>();
+
+		if (pairs.length === 0) return result;
+
 		if (DISABLE_YOUTUBE_API) {
-			console.log(`🎭 YouTube API DISABLED - Returning mock health status for broadcast: ${broadcastId}`);
-			return {
-				lifeCycleStatus: 'live',
-				actualEndTime: undefined,
-				streamStatus: 'active',
-				concurrentViewers: Math.floor(Math.random() * 100),
-			};
+			for (const { broadcastId } of pairs) {
+				result.set(broadcastId, {
+					lifeCycleStatus: 'live',
+					actualEndTime: undefined,
+					streamStatus: 'active',
+					concurrentViewers: Math.floor(Math.random() * 100),
+				});
+			}
+			return result;
 		}
 
 		if (!this.youtube) {
 			throw new Error('YouTube OAuth2 credentials not configured');
 		}
 
+		const broadcastIds = pairs.map((p) => p.broadcastId);
+		const streamIds = pairs.map((p) => p.streamId);
+
 		try {
 			const [broadcastResponse, streamResponse] = await Promise.all([
 				this.youtube.liveBroadcasts.list({
 					part: ['status', 'statistics'],
-					id: [broadcastId],
+					id: broadcastIds,
 				}),
 				this.youtube.liveStreams.list({
 					part: ['status'],
-					id: [streamId],
+					id: streamIds,
 				}),
 			]);
 
-			const broadcast = broadcastResponse.data.items?.[0];
-			const stream = streamResponse.data.items?.[0];
+			const broadcastMap = new Map<string, (typeof broadcastResponse.data.items)[0]>();
+			for (const item of broadcastResponse.data.items ?? []) {
+				if (item.id) broadcastMap.set(item.id, item);
+			}
+			const streamMap = new Map<string, (typeof streamResponse.data.items)[0]>();
+			for (const item of streamResponse.data.items ?? []) {
+				if (item.id) streamMap.set(item.id, item);
+			}
 
-			return {
-				lifeCycleStatus: (broadcast?.status as any)?.lifeCycleStatus,
-				actualEndTime: (broadcast?.status as any)?.actualEndTime,
-				streamStatus: (stream?.status as any)?.streamStatus,
-				concurrentViewers: broadcast?.statistics?.concurrentViewers
-					? Number(broadcast.statistics.concurrentViewers)
-					: undefined,
-			};
+			for (const { broadcastId, streamId } of pairs) {
+				const broadcast = broadcastMap.get(broadcastId);
+				const stream = streamMap.get(streamId);
+				result.set(broadcastId, {
+					lifeCycleStatus: (broadcast?.status as any)?.lifeCycleStatus,
+					actualEndTime: (broadcast?.status as any)?.actualEndTime,
+					streamStatus: (stream?.status as any)?.streamStatus,
+					concurrentViewers: broadcast?.statistics?.concurrentViewers
+						? Number(broadcast.statistics.concurrentViewers)
+						: undefined,
+				});
+			}
+			return result;
 		} catch (error) {
-			console.error(`Failed to get broadcast/stream status for ${broadcastId}:`, error);
+			console.error('Failed to get broadcast/stream status batch:', error);
 			throw new Error(`YouTube API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		}
 	}
