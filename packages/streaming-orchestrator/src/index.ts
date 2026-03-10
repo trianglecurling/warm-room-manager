@@ -545,6 +545,9 @@ function emitJobEvent(jobId: string, type: string, message: string, data?: Recor
 async function endBroadcastForJob(job: Job, reason: string) {
 	const broadcastId = job.streamMetadata?.youtube?.broadcastId;
 	if (!broadcastId) return;
+	// Remove from local store immediately so UI dropdowns clear right away on stop.
+	// YouTube cleanup can complete asynchronously afterward.
+	removeBroadcast(broadcastId);
 	try {
 		const result = await youtubeService.endOrDeleteBroadcast(broadcastId);
 		console.log(`✅ Ended YouTube broadcast for job ${job.id}. Result: ${result}. Reason: ${reason}`);
@@ -556,9 +559,6 @@ async function endBroadcastForJob(job: Job, reason: string) {
 			broadcastId,
 			error: error instanceof Error ? error.message : String(error),
 		});
-	} finally {
-		// Always remove from our store when the job ends so the UI list stays in sync (even if YouTube end failed)
-		removeBroadcast(broadcastId);
 	}
 }
 
