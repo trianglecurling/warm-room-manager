@@ -4,7 +4,7 @@ import { ExclamationTriangleIcon as ExclamationSolidIcon, CheckCircleIcon as Che
 import logo from '../assets/logo.png';
 import { useAutocomplete } from '../hooks/useAutocomplete';
 import { AutocompleteInput } from './AutocompleteInput';
-import { SearchResult, PresetData, CreateTeamRequest, PlayerPosition, apiClient, Team, OrchestratorBroadcast } from '../lib/api';
+import { SearchResult, PresetData, CreateTeamRequest, PlayerPosition, apiClient, Team, OrchestratorBroadcast, OrchestratorJob } from '../lib/api';
 import { ContextModal } from './ContextModal';
 import { usePresets } from '../hooks/usePresets';
 import { PresetNameModal } from './PresetNameModal';
@@ -16,6 +16,7 @@ import { useOAuthStatus } from '../hooks/useOAuthStatus';
 import { YouTubeOAuthPanel } from './YouTubeOAuthPanel';
 import { SecretConfigModal } from './SecretConfigModal';
 import { StreamStartCountdownModal } from './StreamStartCountdownModal';
+import { BulkImportTeamsModal } from './BulkImportTeamsModal';
 
 
 interface SheetData {
@@ -86,6 +87,23 @@ const StreamTextField = memo(({
   );
 });
 
+const TERMINAL_JOB_STATUSES = new Set(['STOPPED', 'FAILED', 'DISMISSED', 'CANCELED', 'UNKNOWN']);
+const RECENT_TERMINAL_JOB_WINDOW_MS = 5 * 60 * 1000;
+const JOB_STATUS_PRIORITY: Record<string, number> = {
+  RUNNING: 700,
+  STARTING: 600,
+  STOPPING: 500,
+  ACCEPTED: 400,
+  ASSIGNED: 300,
+  PENDING: 200,
+  CREATED: 100,
+  UNKNOWN: 50,
+  FAILED: 40,
+  STOPPED: 30,
+  DISMISSED: 20,
+  CANCELED: 10,
+};
+
 export const MonitorManager = () => {
   const [monitorData, setMonitorData] = useState<MonitorData>({
     A: { red: '', yellow: '' },
@@ -115,6 +133,7 @@ export const MonitorManager = () => {
     } catch { return false; }
   });
   const [isContextModalOpen, setIsContextModalOpen] = useState<null | { mode: 'new' | 'edit' }>(null);
+  const [isBulkImportModalOpen, setIsBulkImportModalOpen] = useState(false);
   const [isPresetNameModalOpen, setIsPresetNameModalOpen] = useState(false);
   const [isSecretConfigModalOpen, setIsSecretConfigModalOpen] = useState(false);
   const isSecretConfigModalOpenRef = useRef(isSecretConfigModalOpen);
@@ -162,6 +181,7 @@ export const MonitorManager = () => {
     jobId?: string; // Associated orchestrator job ID
     jobStatus?: string; // Status from orchestrator job
     error?: string; // Error message from failed jobs
+    errorCode?: string;
     redTeam?: string;
     yellowTeam?: string;
   }
@@ -275,6 +295,43 @@ export const MonitorManager = () => {
     return map;
   }, [restartEvents]);
 
+  const getJobTimestamp = (job: OrchestratorJob) => {
+    const ts = job.updatedAt ?? job.endedAt ?? job.startedAt ?? job.createdAt;
+    const parsed = ts ? new Date(ts).getTime() : 0;
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const shouldReplaceSelectedJob = (current: OrchestratorJob, candidate: OrchestratorJob) => {
+    const currentPriority = JOB_STATUS_PRIORITY[current.status] ?? 0;
+    const candidatePriority = JOB_STATUS_PRIORITY[candidate.status] ?? 0;
+    if (candidatePriority !== currentPriority) {
+      return candidatePriority > currentPriority;
+    }
+    return getJobTimestamp(candidate) > getJobTimestamp(current);
+  };
+
+  const selectedJobByStream = useMemo(() => {
+    const selected: Partial<Record<StreamKey, OrchestratorJob>> = {};
+    const now = Date.now();
+
+    orchestratorJobs.forEach(job => {
+      const streamKey = job.inlineConfig?.streamKey as StreamKey | undefined;
+      if (!streamKey || !streamOrder.includes(streamKey)) return;
+
+      if (TERMINAL_JOB_STATUSES.has(job.status)) {
+        const age = now - getJobTimestamp(job);
+        if (age > RECENT_TERMINAL_JOB_WINDOW_MS) return;
+      }
+
+      const existing = selected[streamKey];
+      if (!existing || shouldReplaceSelectedJob(existing, job)) {
+        selected[streamKey] = job;
+      }
+    });
+
+    return selected;
+  }, [orchestratorJobs]);
+
   // Helper function to convert StreamKey to sheet identifier
   const getSheetIdentifier = (streamKey: StreamKey): 'A' | 'B' | 'C' | 'D' | 'vibe' => {
     switch (streamKey) {
@@ -284,6 +341,21 @@ export const MonitorManager = () => {
       case 'sheetD': return 'D';
       case 'vibe': return 'vibe';
       default: return 'A';
+    }
+  };
+
+  const getErrorHint = (errorCode?: string): string | null => {
+    switch (errorCode) {
+      case 'OBS_WS_AUTH_MISMATCH':
+        return 'OBS is running but websocket auth failed. Verify OBS password matches OBS_PASSWORD.';
+      case 'OBS_WS_PORT_UNREACHABLE':
+        return 'OBS websocket is unreachable. Ensure websocket server is enabled and OBS_PORT matches OBS settings.';
+      case 'OBS_WS_ATTACH_FAILED':
+        return 'OBS is running but the agent cannot attach. Check websocket host/port/password and restart OBS websocket server.';
+      case 'OBS_LAUNCH_FAILED':
+        return 'Agent failed to launch OBS. Verify OBS_PATH and account/session permissions for GUI apps.';
+      default:
+        return null;
     }
   };
 
@@ -375,70 +447,64 @@ export const MonitorManager = () => {
         isLive: false,
         jobId: undefined,
         jobStatus: undefined,
+        error: undefined,
+        errorCode: undefined,
       };
     });
 
-    // Set streams based on jobs - show URLs as soon as metadata is available
-    orchestratorJobs.forEach(job => {
-      if (job.inlineConfig?.streamKey) {
-        const streamKey = job.inlineConfig.streamKey as StreamKey;
-        if (updatedStreams[streamKey]) {
-          const metadata = job.streamMetadata;
+    // Set streams based on selected jobs - avoid stale terminal jobs overriding current state.
+    streamOrder.forEach(streamKey => {
+      const job = selectedJobByStream[streamKey];
+      if (!job) return;
+      const metadata = job.streamMetadata;
 
-          // Use metadata from orchestrator for URLs and other data, regardless of job status
-          const baseStreamData = {
-            ...updatedStreams[streamKey],
-            jobId: job.id,
-            jobStatus: job.status,
-            // Only show real YouTube URLs when available from metadata
-            publicUrl: metadata?.publicUrl || null,
-            adminUrl: metadata?.adminUrl || null,
-            isPaused: metadata?.isPaused ?? false,
-            broadcastId: metadata?.youtube?.broadcastId,
-            autoStopEnabled: metadata?.autoStopEnabled,
-            autoStopMinutes: metadata?.autoStopMinutes,
-            autoStopAt: metadata?.autoStopAt,
-            // ONLY use metadata for title/description (which gets synced to local state via useEffect)
-            // Never use inlineConfig as it contains the pre-generation values
-            title: updatedStreams[streamKey].title,
-            description: updatedStreams[streamKey].description,
-          };
+      const baseStreamData = {
+        ...updatedStreams[streamKey],
+        jobId: job.id,
+        jobStatus: job.status,
+        publicUrl: metadata?.publicUrl || null,
+        adminUrl: metadata?.adminUrl || null,
+        isPaused: metadata?.isPaused ?? false,
+        broadcastId: metadata?.youtube?.broadcastId,
+        autoStopEnabled: metadata?.autoStopEnabled,
+        autoStopMinutes: metadata?.autoStopMinutes,
+        autoStopAt: metadata?.autoStopAt,
+        // ONLY use metadata for title/description (which gets synced to local state via useEffect)
+        // Never use inlineConfig as it contains pre-generation values
+        title: updatedStreams[streamKey].title,
+        description: updatedStreams[streamKey].description,
+      };
 
-          if (job.status === 'RUNNING') {
-            // Running jobs are live and show real-time data
-            updatedStreams[streamKey] = {
-              ...baseStreamData,
-              isLive: true,
-              viewers: metadata?.viewers ?? 0, // Use real viewer count from orchestrator
-            };
-          } else if (job.status === 'FAILED' && job.error) {
-            // Handle failed jobs by showing error state
-            updatedStreams[streamKey] = {
-              ...baseStreamData,
-              isLive: false,
-              error: job.error.message,
-            };
-          } else if (job.status === 'DISMISSED') {
-            // Dismissed jobs don't show any error state
-            updatedStreams[streamKey] = {
-              ...baseStreamData,
-              isLive: false,
-              error: undefined,
-            };
-          } else {
-            // Other job statuses (CREATED, PENDING, ASSIGNED, ACCEPTED, etc.)
-            // Show URLs but not live status
-            updatedStreams[streamKey] = {
-              ...baseStreamData,
-              isLive: false,
-            };
-          }
-        }
+      if (job.status === 'RUNNING') {
+        updatedStreams[streamKey] = {
+          ...baseStreamData,
+          isLive: true,
+          viewers: metadata?.viewers ?? 0,
+        };
+      } else if (job.status === 'FAILED' && job.error) {
+        updatedStreams[streamKey] = {
+          ...baseStreamData,
+          isLive: false,
+          error: job.error.message,
+          errorCode: job.error.code,
+        };
+      } else if (job.status === 'DISMISSED') {
+        updatedStreams[streamKey] = {
+          ...baseStreamData,
+          isLive: false,
+          error: undefined,
+          errorCode: undefined,
+        };
+      } else {
+        updatedStreams[streamKey] = {
+          ...baseStreamData,
+          isLive: false,
+        };
       }
     });
 
     return updatedStreams;
-  }, [streams, orchestratorJobs]);
+  }, [selectedJobByStream, streams]);
 
   useEffect(() => {
     streamsWithJobsRef.current = streamsWithJobs;
@@ -456,42 +522,36 @@ export const MonitorManager = () => {
 
   // Sync title/description from job metadata to local state
   useEffect(() => {
-    orchestratorJobs.forEach(job => {
-      if (job.inlineConfig?.streamKey && job.streamMetadata) {
-        const streamKey = job.inlineConfig.streamKey as StreamKey;
+    setStreams(prev => {
+      let changed = false;
+      const next = { ...prev };
+
+      streamOrder.forEach(streamKey => {
+        const job = selectedJobByStream[streamKey];
+        if (!job?.streamMetadata) return;
+        if (TERMINAL_JOB_STATUSES.has(job.status)) return;
         const metadata = job.streamMetadata;
-        
-        // Skip syncing if we just updated this stream (prevents cursor jumps while typing)
+
         const lastUpdate = lastUpdateTimeRef.current[streamKey] || 0;
         const timeSinceUpdate = Date.now() - lastUpdate;
-        if (timeSinceUpdate < 2000) {
-          // Skip syncing for 2 seconds after user edits
-          return;
-        }
-        
-        setStreams(prev => {
-          const currentStream = prev[streamKey];
-          
-          // Check if we need to update
-          const titleNeedsSync = metadata.title !== undefined && currentStream.title !== metadata.title;
-          const descriptionNeedsSync = metadata.description !== undefined && currentStream.description !== metadata.description;
-          
-          if (titleNeedsSync || descriptionNeedsSync) {
-            return {
-              ...prev,
-              [streamKey]: {
-                ...currentStream,
-                title: metadata.title ?? currentStream.title,
-                description: metadata.description ?? currentStream.description,
-              }
-            };
-          }
-          
-          return prev;
-        });
-      }
+        if (timeSinceUpdate < 2000) return;
+
+        const currentStream = next[streamKey];
+        const titleNeedsSync = metadata.title !== undefined && currentStream.title !== metadata.title;
+        const descriptionNeedsSync = metadata.description !== undefined && currentStream.description !== metadata.description;
+        if (!titleNeedsSync && !descriptionNeedsSync) return;
+
+        changed = true;
+        next[streamKey] = {
+          ...currentStream,
+          title: metadata.title ?? currentStream.title,
+          description: metadata.description ?? currentStream.description,
+        };
+      });
+
+      return changed ? next : prev;
     });
-  }, [orchestratorJobs]);
+  }, [selectedJobByStream]);
 
   useEffect(() => {
     orchestratorJobs.forEach(job => {
@@ -513,8 +573,10 @@ export const MonitorManager = () => {
 
     orchestratorJobs.forEach(job => {
       const prevStatus = jobStatusRef.current[job.id];
+      const isFirstSeenStatus = prevStatus === undefined;
       if (prevStatus === job.status) return;
       jobStatusRef.current[job.id] = job.status;
+      if (isFirstSeenStatus) return;
 
       if (!stoppedStatuses.has(job.status)) return;
       shouldRefresh = true;
@@ -2503,6 +2565,13 @@ export const MonitorManager = () => {
                       <div className="absolute right-0 mt-1 w-56 bg-white border border-gray-200 rounded shadow z-10">
                         <button
                           className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 cursor-pointer"
+                          onClick={() => { setIsMenuOpen(false); setIsBulkImportModalOpen(true); }}
+                          disabled={!selectedContext}
+                        >
+                          Bulk import teams
+                        </button>
+                        <button
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 cursor-pointer"
                           onClick={() => { setIsMenuOpen(false); synchronizeLeagues(); }}
                           disabled={isSyncing || isRefreshingCache}
                         >
@@ -3409,6 +3478,11 @@ export const MonitorManager = () => {
                               </svg>
                             </button>
                             <strong>Error:</strong> {s.error}
+                            {getErrorHint(s.errorCode) && (
+                              <div className="mt-1 text-xs text-red-700">
+                                <strong>Hint:</strong> {getErrorHint(s.errorCode)}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -3770,6 +3844,23 @@ export const MonitorManager = () => {
                               {orchestratorConnected ? (orchestratorAgent.drain ? 'ON' : 'OFF') : 'N/A'}
                             </button>
                           </div>
+                          {orchestratorAgent.state === 'RESERVED' && (
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await apiClient.releaseAgentReservation(a.id);
+                                  setSuccess(`Released ${a.name} from reserved state`);
+                                } catch (error: any) {
+                                  setError(`Failed to release reservation: ${error.message}`);
+                                }
+                              }}
+                              className="text-xs px-2 py-1 rounded bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                              disabled={!orchestratorConnected}
+                              title={orchestratorConnected ? 'Release agent from reserved state (no streams pending)' : 'Orchestrator offline'}
+                            >
+                              Release
+                            </button>
+                          )}
                           <button
                             onClick={async () => {
                               if (!confirm(`Are you sure you want to reboot agent "${a.name}"? This will restart the entire machine.`)) {
@@ -3835,6 +3926,13 @@ export const MonitorManager = () => {
         mode={isContextModalOpen.mode}
         initial={isContextModalOpen.mode === 'edit' ? contexts.find((c) => c.name === selectedContext) ?? null : null}
         onClose={() => setIsContextModalOpen(null)}
+      />
+    )}
+    {isBulkImportModalOpen && (
+      <BulkImportTeamsModal
+        context={contexts.find((c) => c.name === selectedContext) ?? null}
+        onClose={() => setIsBulkImportModalOpen(false)}
+        onSuccess={(count) => setSuccess(`${count} teams imported`)}
       />
     )}
     {isPresetNameModalOpen && (

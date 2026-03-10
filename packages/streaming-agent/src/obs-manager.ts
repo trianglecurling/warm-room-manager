@@ -1,5 +1,6 @@
 import { OBSWebSocket } from 'obs-websocket-js';
 import { ChildProcess } from 'child_process';
+import { Socket } from 'net';
 
 export interface OBSConfig {
 	host: string;
@@ -14,11 +15,25 @@ export interface StreamConfig {
 
 export type StreamFailureReason = 'obs' | 'ffmpeg';
 
+class OBSManagerError extends Error {
+	code: string;
+
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = 'OBSManagerError';
+		this.code = code;
+	}
+}
+
 export class OBSManager {
 	private obs: OBSWebSocket;
+	private config: OBSConfig;
 	private ffmpegProcess: ChildProcess | null = null;
 	private isConnected = false;
 	private currentScene = 'SheetA';
+	private startOBSPromise: Promise<void> | null = null;
+	private launchedObsPid: number | null = null;
+	private ownsOBSProcess = false;
 	/** Called when OBS or FFmpeg fails unexpectedly during active streaming. Cleared on stopStreaming. */
 	private onStreamFailure?: (reason: StreamFailureReason) => void;
 
@@ -55,7 +70,9 @@ export class OBSManager {
 	}
 
 	constructor(config: OBSConfig = { host: 'localhost', port: 4455 }) {
+		this.config = config;
 		this.obs = new OBSWebSocket();
+		console.log(`OBS connection config: host=${this.config.host}, port=${this.config.port}, password=${this.config.password ? '[set]' : '[not set]'}`);
 
 		this.obs.on('ConnectionOpened', () => {
 			console.log('OBS WebSocket connected');
@@ -79,7 +96,8 @@ export class OBSManager {
 
 	async connect(): Promise<void> {
 		try {
-			await this.obs.connect(`ws://localhost:4455`, 'randompassword123');
+			const endpoint = `ws://${this.config.host}:${this.config.port}`;
+			await this.obs.connect(endpoint, this.config.password);
 			console.log('OBS WebSocket connected successfully');
 		} catch (error) {
 			console.error('Failed to connect to OBS:', error);
@@ -111,6 +129,152 @@ export class OBSManager {
 		}
 	}
 
+	private classifyOBSConnectionError(message: string): 'auth' | 'refused' | 'timeout' | 'other' {
+		const lower = message.toLowerCase();
+		if (
+			lower.includes('authentication') ||
+			lower.includes('auth failed') ||
+			lower.includes('invalid password') ||
+			lower.includes('identify')
+		) {
+			return 'auth';
+		}
+		if (lower.includes('econnrefused') || lower.includes('connection refused')) {
+			return 'refused';
+		}
+		if (lower.includes('etimedout') || lower.includes('timeout')) {
+			return 'timeout';
+		}
+		return 'other';
+	}
+
+	private getAttachErrorCode(errorKind: 'auth' | 'refused' | 'timeout' | 'other', portReachable: boolean): string {
+		if (errorKind === 'auth') return 'OBS_WS_AUTH_MISMATCH';
+		if (!portReachable || errorKind === 'refused' || errorKind === 'timeout') return 'OBS_WS_PORT_UNREACHABLE';
+		return 'OBS_WS_ATTACH_FAILED';
+	}
+
+	private async isOBSWebSocketPortReachable(timeoutMs = 1200): Promise<boolean> {
+		return await new Promise((resolve) => {
+			const socket = new Socket();
+			const cleanup = () => {
+				socket.removeAllListeners();
+				socket.destroy();
+			};
+			socket.setTimeout(timeoutMs);
+			socket.once('connect', () => {
+				cleanup();
+				resolve(true);
+			});
+			socket.once('timeout', () => {
+				cleanup();
+				resolve(false);
+			});
+			socket.once('error', () => {
+				cleanup();
+				resolve(false);
+			});
+			socket.connect(this.config.port, this.config.host);
+		});
+	}
+
+	private async isOBSProcessRunning(): Promise<boolean> {
+		const { exec } = require('child_process');
+		const { promisify } = require('util');
+		const execAsync = promisify(exec);
+		try {
+			const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq obs64.exe" /FO CSV /NH');
+			return !!(stdout && stdout.trim() && !stdout.includes('INFO: No tasks'));
+		} catch {
+			return false;
+		}
+	}
+
+	private async ensureVirtualCameraStarted(): Promise<void> {
+		if (!this.isConnected) return;
+		try {
+			await this.obs.call('StartVirtualCam');
+			console.log('Virtual camera started successfully');
+		} catch (error: any) {
+			const msg = String(error?.message || error || '');
+			const alreadyRunning =
+				msg.toLowerCase().includes('already') &&
+				msg.toLowerCase().includes('virtual') &&
+				msg.toLowerCase().includes('camera');
+			const unsupported = error?.code === 501;
+			if (alreadyRunning) {
+				console.log('Virtual camera already running');
+				return;
+			}
+			if (unsupported) {
+				console.log('StartVirtualCam not supported by this OBS version; relying on OBS launch flags');
+				return;
+			}
+			throw error;
+		}
+	}
+
+	private async launchOBSProcess(sceneName: string): Promise<void> {
+		const obsPath = process.env.OBS_PATH || 'obs64.exe';
+		const { spawn } = require('child_process');
+		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
+		console.log('OBS working directory:', obsDir);
+
+		// Deliberately omit --multi to prevent multiple OBS instances.
+		const obsArgs = [
+			`--websocket_port=${this.config.port}`,
+			'--collection', 'auto4k',
+			'--scene', sceneName,
+			'--minimize-to-tray',
+			'--disable-shutdown-check',
+			'--disable-updater',
+			'--startvirtualcam'
+		];
+		if (this.config.password) {
+			obsArgs.splice(1, 0, `--websocket_password=${this.config.password}`);
+		}
+
+		let obsProcess: ChildProcess;
+		try {
+			obsProcess = spawn(obsPath, obsArgs, {
+				cwd: obsDir,
+				detached: true,
+				stdio: 'ignore'
+			});
+		} catch (error: any) {
+			throw new OBSManagerError(
+				'OBS_LAUNCH_FAILED',
+				`Failed to launch OBS process: ${error?.message || String(error)}`
+			);
+		}
+
+		this.launchedObsPid = obsProcess.pid ?? null;
+		this.ownsOBSProcess = true;
+		obsProcess.unref();
+		if (!this.launchedObsPid) {
+			throw new OBSManagerError('OBS_LAUNCH_FAILED', 'Failed to launch OBS process: no process id returned');
+		}
+
+		await new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				resolve();
+			}, 700);
+			obsProcess.once('error', (error: Error) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				reject(new OBSManagerError('OBS_LAUNCH_FAILED', `Failed to start OBS process: ${error.message}`));
+			});
+		});
+
+		obsProcess.on('exit', (code: number | null, signal: string | null) => {
+			console.log(`OBS process exited with code: ${code}, signal: ${signal}`);
+		});
+	}
+
 	async disconnect(): Promise<void> {
 		if (this.isConnected) {
 			await this.obs.disconnect();
@@ -120,75 +284,98 @@ export class OBSManager {
 
 
 	async startOBS(sceneName: string = 'SheetA'): Promise<void> {
-		// Update current scene before starting OBS
 		this.currentScene = sceneName;
+		console.log('🏁 Ensuring OBS is available with scene:', sceneName);
 
-		const obsPath = process.env.OBS_PATH || 'obs64.exe';
-
-		console.log('🏁 Starting OBS with path:', obsPath, 'and scene:', sceneName);
-		console.log('🎬 Setting currentScene to:', sceneName);
-		const { spawn, exec } = require('child_process');
-		const { promisify } = require('util');
-		const execAsync = promisify(exec);
-
-		// Check if OBS is already running
-		try {
-			const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq obs64.exe" /FO CSV /NH');
-			if (stdout && stdout.trim() && !stdout.includes('INFO: No tasks')) {
-				console.log('⚠️  OBS is already running. Will attempt to connect to existing instance.');
-				// Try to connect to existing OBS instance
-				await this.connectWithRetry(15, 1000);
-				return;
-			}
-		} catch (error) {
-			// Ignore errors checking for OBS - it might not be running
-			console.log('OBS is not currently running, will start it now');
+		if (this.isConnected) {
+			await this.setCurrentScene(sceneName);
+			await this.ensureVirtualCameraStarted();
+			return;
 		}
 
-		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
-		console.log('OBS working directory:', obsDir);
+		if (this.startOBSPromise) {
+			await this.startOBSPromise;
+			return;
+		}
 
-		// Build OBS command arguments
-		const obsArgs = [
-			'--websocket_port=4455',
-			'--websocket_password=randompassword123',
-			'--collection', 'auto4k',
-			'--scene', sceneName,
-			'--multi',
-			'--minimize-to-tray',
-			'--disable-shutdown-check',
-			'--disable-updater',
-			'--startvirtualcam'
-		];
-
-		// Simple spawn approach - works when running interactively
-		const obsProcess = spawn(obsPath, obsArgs, {
-			cwd: obsDir,
-			detached: true,
-			stdio: 'ignore'
-		});
-
-		obsProcess.unref();
-
-		obsProcess.on('error', (error: Error) => {
-			console.error('Failed to start OBS process:', error);
-			throw new Error(`OBS startup failed: ${error.message}`);
-		});
-
-		obsProcess.on('exit', (code: number | null, signal: string | null) => {
-			console.log(`OBS process exited with code: ${code}, signal: ${signal}`);
-			if (code !== 0 && code !== null) {
-				console.warn(`OBS exited unexpectedly with code ${code}`);
+		this.startOBSPromise = (async () => {
+			// Fast path: OBS may already be up and just needs websocket attach.
+			try {
+				await this.connectWithRetry(2, 500);
+				console.log('Connected to existing OBS instance');
+				this.ownsOBSProcess = false;
+				await this.setCurrentScene(sceneName);
+				await this.ensureVirtualCameraStarted();
+				return;
+			} catch {
+				// Continue to process checks below.
 			}
+
+			const running = await this.isOBSProcessRunning();
+			if (running) {
+				// Guardrail: do not launch another OBS process when one already exists.
+				// This usually means websocket settings are mismatched on the running instance.
+				try {
+					await this.connectWithRetry(15, 1000);
+				} catch (error) {
+					const rawMessage = error instanceof Error ? error.message : String(error);
+					const errorKind = this.classifyOBSConnectionError(rawMessage);
+					const portReachable = await this.isOBSWebSocketPortReachable();
+					const code = this.getAttachErrorCode(errorKind, portReachable);
+					let likelyCause = 'OBS WebSocket is configured differently than the agent.';
+					if (errorKind === 'auth') {
+						likelyCause = 'OBS WebSocket password does not match OBS_PASSWORD.';
+					} else if (!portReachable || errorKind === 'refused') {
+						likelyCause = 'OBS WebSocket server is disabled or OBS is listening on a different port.';
+					}
+					const guidance = [
+						`OBS process is running, but agent could not attach to ws://${this.config.host}:${this.config.port}.`,
+						`Likely cause: ${likelyCause}`,
+						`Check OBS > Tools > WebSocket Server Settings and verify port/password match OBS_PORT/OBS_PASSWORD.`,
+						`Port reachable from agent: ${portReachable ? 'yes' : 'no'}.`,
+						`Last error: ${rawMessage}`,
+					].join(' ');
+					console.error('OBS attach diagnostic:', {
+						host: this.config.host,
+						port: this.config.port,
+						passwordConfigured: !!this.config.password,
+						portReachable,
+						errorKind,
+						rawMessage,
+					});
+					throw new OBSManagerError(code, guidance);
+				}
+				this.ownsOBSProcess = false;
+				await this.setCurrentScene(sceneName);
+				await this.ensureVirtualCameraStarted();
+				return;
+			}
+
+			await this.launchOBSProcess(sceneName);
+
+			// Give OBS process time to initialize before websocket retries.
+			console.log('Waiting 10 seconds for OBS to initialize...');
+			await new Promise(resolve => setTimeout(resolve, 10000));
+			try {
+				await this.connectWithRetry(20, 1000);
+			} catch (error) {
+				const rawMessage = error instanceof Error ? error.message : String(error);
+				const errorKind = this.classifyOBSConnectionError(rawMessage);
+				const portReachable = await this.isOBSWebSocketPortReachable();
+				const code = this.getAttachErrorCode(errorKind, portReachable);
+				throw new OBSManagerError(
+					code,
+					`OBS was launched but agent could not connect to ws://${this.config.host}:${this.config.port}. ` +
+					`Check OBS WebSocket settings (enabled, port/password). Last error: ${rawMessage}`
+				);
+			}
+			await this.setCurrentScene(sceneName);
+			await this.ensureVirtualCameraStarted();
+		})().finally(() => {
+			this.startOBSPromise = null;
 		});
 
-		// Wait longer for OBS to fully initialize (15 seconds)
-		console.log('Waiting 15 seconds for OBS to fully initialize...');
-		await new Promise(resolve => setTimeout(resolve, 15000));
-
-		// Try to connect to OBS WebSocket with retry logic (up to ~15 seconds total)
-		console.log('OBS should now be ready for WebSocket connection');
-		await this.connectWithRetry(15, 1000); // 15 attempts, 1 second apart (~15 seconds total)
+		await this.startOBSPromise;
 	}
 
 	async stopOBS(): Promise<void> {
@@ -202,17 +389,22 @@ export class OBSManager {
 			console.warn('Failed to stop FFmpeg in stopOBS, it may already be stopped:', error);
 		}
 
-		// Force close OBS process if needed
-		try {
-			const { spawn } = require('child_process');
-			const obsExeName = 'obs64.exe';
-			console.log(`Stopping OBS process: ${obsExeName}`);
-			spawn('taskkill', ['/f', '/im', obsExeName], {
-				stdio: 'ignore'
-			});
-		} catch (error) {
-			console.warn('Failed to kill OBS process:', error);
+		// Only force-kill OBS if this manager launched it.
+		if (this.ownsOBSProcess && this.launchedObsPid) {
+			try {
+				const { spawn } = require('child_process');
+				console.log(`Stopping OBS process PID: ${this.launchedObsPid}`);
+				spawn('taskkill', ['/f', '/pid', String(this.launchedObsPid)], {
+					stdio: 'ignore'
+				});
+			} catch (error) {
+				console.warn('Failed to kill OBS process by PID:', error);
+			}
+		} else {
+			console.log('Skipping OBS process kill (agent does not own current OBS process)');
 		}
+		this.launchedObsPid = null;
+		this.ownsOBSProcess = false;
 	}
 
 	async startStreaming(

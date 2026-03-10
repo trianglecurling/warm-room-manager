@@ -80,7 +80,11 @@ function connect() {
 	console.log(`Agent ${AGENT_NAME} connecting to ${ORCHESTRATOR_URL}...`);
 
 	// Initialize OBS Manager
-	obsManager = new OBSManager();
+	obsManager = new OBSManager({
+		host: process.env.OBS_HOST || 'localhost',
+		port: Number(process.env.OBS_PORT || '4455'),
+		password: process.env.OBS_PASSWORD || 'randompassword123',
+	});
 
 	const currentWs = new WebSocket(ORCHESTRATOR_URL);
 	ws = currentWs; // Update module-level reference
@@ -314,14 +318,17 @@ async function startStreamingJob(jobId: string, config: any, streamMetadata?: St
 
 	} catch (error) {
 		console.error(`Failed to start streaming job ${jobId}:`, error);
+		const typedError = error as { code?: string; message?: string } | undefined;
+		const errorCode = typedError?.code || "STREAMING_FAILED";
+		const errorMessage = typedError?.message || (error instanceof Error ? error.message : "Unknown error");
 		state = "IDLE";
 		currentJobId = null;
 		send(Msg.AgentJobStopped, {
 			jobId,
 			status: "FAILED" as const,
 			error: {
-				code: "STREAMING_FAILED",
-				message: error instanceof Error ? error.message : "Unknown error"
+				code: errorCode,
+				message: errorMessage
 			}
 		});
 	}
@@ -333,7 +340,6 @@ async function stopStreamingJob(jobId: string, reason?: string) {
 
 		if (obsManager) {
 			await obsManager.stopStreaming();
-			await obsManager.stopFFmpegStream();
 		}
 
 		isPaused = false;

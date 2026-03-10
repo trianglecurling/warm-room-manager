@@ -215,6 +215,13 @@ Content-Type: application/json
 
 Sets an agent's drain mode to prevent new job assignments.
 
+**Release Agent Reservation**
+```http
+POST /v1/agents/:id/release-reservation
+```
+
+Releases an agent stuck in RESERVED state when there are no streams pending. Use when an agent is reserved for auto-start but the broadcast was removed/disabled, or when job assignment failed and left the agent in RESERVED.
+
 #### Job Management
 
 **List Jobs**

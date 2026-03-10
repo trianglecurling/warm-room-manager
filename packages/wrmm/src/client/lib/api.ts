@@ -493,6 +493,28 @@ class ApiClient {
     }
   }
 
+  async bulkCreateTeams(payload: {
+    format: string;
+    data: string[][];
+    contextName: string;
+    contextType: 'league' | 'tournament' | 'miscellaneous';
+    contextStartDate?: string;
+    contextEndDate?: string;
+  }): Promise<{ count: number }> {
+    const res = await fetch(`${EXTERNAL_BASE_URL}/api/teams/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => '');
+      throw new Error(msg || `Failed to bulk create teams: ${res.status} ${res.statusText}`);
+    }
+    const raw: any = await res.json();
+    const data = Array.isArray(raw?.data) ? raw.data : [];
+    return { count: data.length };
+  }
+
   // Orchestrator API methods
   async getOrchestratorHealth(): Promise<OrchestratorHealth> {
     const url = `${ORCHESTRATOR_BASE_URL}/healthz`;
@@ -626,6 +648,16 @@ class ApiClient {
       const errorText = await res.text().catch(() => '');
       throw new Error(errorText || `Failed to stop job: ${res.status} ${res.statusText}`);
     }
+  }
+
+  async releaseAgentReservation(agentId: string): Promise<{ ok: boolean; agent: OrchestratorAgent }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/agents/${agentId}/release-reservation`;
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const errorData = await res.json().catch(async () => ({ error: await res.text() }));
+      throw new Error(errorData.error || `Failed to release agent reservation: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
   }
 
   async setAgentDrain(agentId: string, drain: boolean): Promise<void> {

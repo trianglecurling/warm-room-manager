@@ -1507,6 +1507,57 @@ app.put<{
 	return { ok: true, agent: toPublicAgent(a) };
 });
 
+/**
+ * Release an agent from RESERVED state. Use when an agent is stuck as RESERVED
+ * with no streams pending (e.g. auto-start reservation orphaned, or job assign failed).
+ * Clears both auto-start reservation and actual RESERVED state if applicable.
+ */
+app.post<{ Params: { id: string } }>("/v1/agents/:id/release-reservation", async (req, reply) => {
+	const agentId = req.params.id;
+	const a = agents.get(agentId);
+	if (!a) return reply.code(404).send({ error: "Agent not found" });
+
+	let released = false;
+
+	// 1. Release from auto-start reservation (agent shows RESERVED via isAgentReserved)
+	if (autoStartReservedAgents.has(agentId)) {
+		releaseAutoStartReservation(agentId);
+		released = true;
+		// Clear any broadcast that still has this agent reserved (persist consistency)
+		for (const record of broadcasts.values()) {
+			if (record.autoStartReservedAgentId === agentId) {
+				upsertBroadcast({ ...record, autoStartReservedAgentId: undefined });
+			}
+		}
+	}
+
+	// 2. If agent's actual state is RESERVED and has no active job, reset to IDLE
+	if (a.state === "RESERVED" && a.ws && !a.drain) {
+		const job = a.currentJobId ? jobs.get(a.currentJobId) : null;
+		const jobActive = job && !["STOPPED", "FAILED", "CANCELED", "DISMISSED"].includes(job.status);
+		if (!jobActive) {
+			a.currentJobId = null;
+			setAgentState(a, "IDLE");
+			released = true;
+			// Revert any job stuck in ASSIGNED for this agent
+			for (const j of jobs.values()) {
+				if (j.agentId === agentId && j.status === "ASSIGNED") {
+					updateJob(j.id, { status: "PENDING", agentId: null });
+				}
+			}
+		}
+	}
+
+	if (!released) {
+		return reply.code(400).send({
+			error: "Agent is not in a releasable RESERVED state",
+			agent: toPublicAgent(a),
+		});
+	}
+
+	return reply.code(200).send({ ok: true, agent: toPublicAgent(a) });
+});
+
 // Helper function to reboot a single agent via SSH
 async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ success: boolean; agentId: string; agentName: string; host: string; error?: string }> {
 	// Get SSH configuration from environment variables

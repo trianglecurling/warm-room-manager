@@ -11,6 +11,9 @@ The streaming agent connects to the orchestrator and manages OBS streaming jobs.
 - `AGENT_ID` - Unique identifier for this agent (default: `agent-<hostname>`)
 - `AGENT_NAME` - Display name for this agent (default: `<hostname>`)
 - `OBS_PATH` - Full path to OBS executable (default: `obs64.exe`)
+- `OBS_HOST` - OBS WebSocket host (default: `localhost`)
+- `OBS_PORT` - OBS WebSocket port (default: `4455`)
+- `OBS_PASSWORD` - OBS WebSocket password (default: `randompassword123`)
 - `OBS_USER` - Windows username to run OBS as (optional, auto-detected if not set)
 
 ## Running the Agent
@@ -109,6 +112,13 @@ If OBS fails to start when running as a PM2 service:
    - Look for messages about "Launching OBS in interactive session"
    - Check for Task Scheduler errors
    - Verify the scheduled task is created and executed
+
+8. **If OBS is running but agent cannot attach**:
+   - Open **OBS > Tools > WebSocket Server Settings**
+   - Ensure **Enable WebSocket server** is checked
+   - Verify OBS port/password match `OBS_PORT` and `OBS_PASSWORD`
+   - A mismatch here usually appears as:  
+     `OBS process is running, but agent could not attach to ws://...`
 
 ## Agent Reboot Configuration
 
