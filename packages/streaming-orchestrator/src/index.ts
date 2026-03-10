@@ -1667,19 +1667,29 @@ async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<Agen
 
 // Helper function to update a single agent via SSH
 async function updateAgentViaSSH(agent: AgentNode, reason: string): Promise<AgentSshActionResult> {
-	const defaultUpdateCommand =
-		`powershell -NoProfile -ExecutionPolicy Bypass -Command ` +
-		`"$ErrorActionPreference='Stop'; ` +
-		`$agentDir='C:\\dev\\warm-room-manager\\packages\\streaming-agent'; ` +
-		`Get-CimInstance Win32_Process -Filter \\\"Name = 'node.exe'\\\" | ` +
-		`Where-Object { $_.CommandLine -and $_.CommandLine -like '*packages\\\\streaming-agent*' } | ` +
-		`ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; ` +
-		`Set-Location $agentDir; ` +
-		`git pull origin main; ` +
-		`npm run build; ` +
-		`Start-Process -FilePath 'npm' -ArgumentList 'start' -WorkingDirectory $agentDir"`;
+	const updateScript = `
+$ErrorActionPreference = 'Stop'
+$agentDir = 'C:\\dev\\warm-room-manager\\packages\\streaming-agent'
+
+# Kill only node processes clearly associated with streaming-agent
+Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" |
+  Where-Object { $_.CommandLine -and ($_.CommandLine -match 'streaming-agent') } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Set-Location $agentDir
+git pull origin main
+npm run build
+
+# Relaunch detached so SSH command can return.
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'npm start' -WorkingDirectory $agentDir -WindowStyle Hidden
+`.trim();
+	const encoded = Buffer.from(updateScript, 'utf16le').toString('base64');
+	const defaultUpdateCommand = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
 	const updateCommand = process.env.AGENT_UPDATE_COMMAND || defaultUpdateCommand;
 	console.log(`⬆️ Update requested for ${agent.name}: ${reason}`);
+	if (!process.env.AGENT_UPDATE_COMMAND) {
+		console.log(`Using default encoded update command for ${agent.name}`);
+	}
 	return executeAgentSshAction(agent, updateCommand, 'update');
 }
 

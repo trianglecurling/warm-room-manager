@@ -34,8 +34,29 @@ export class OBSManager {
 	private startOBSPromise: Promise<void> | null = null;
 	private launchedObsPid: number | null = null;
 	private ownsOBSProcess = false;
+	private recoveringObsDisconnect = false;
 	/** Called when OBS or FFmpeg fails unexpectedly during active streaming. Cleared on stopStreaming. */
 	private onStreamFailure?: (reason: StreamFailureReason) => void;
+
+	private getStreamingProfile() {
+		const profile = {
+			videoCodec: process.env.FFMPEG_VIDEO_CODEC || 'hevc_amf',
+			videoRateControl: process.env.FFMPEG_VIDEO_RATE_CONTROL || 'cqp',
+			videoQ: process.env.FFMPEG_VIDEO_Q || '20',
+			videoBitrate: process.env.FFMPEG_VIDEO_BITRATE || '15000k',
+			videoMaxrate: process.env.FFMPEG_VIDEO_MAXRATE || '20000k',
+			videoBufsize: process.env.FFMPEG_VIDEO_BUFSIZE || '45000k',
+			audioBitrate: process.env.FFMPEG_AUDIO_BITRATE || '128k',
+			fps: process.env.FFMPEG_FPS || '30',
+			gop: process.env.FFMPEG_GOP || '60',
+			videoFilter: process.env.FFMPEG_VIDEO_FILTER || 'scale=1920:1080,format=yuv420p',
+			videoInputBuffer: process.env.FFMPEG_VIDEO_INPUT_RTBUFSIZE || '1000M',
+			audioInputBuffer: process.env.FFMPEG_AUDIO_INPUT_RTBUFSIZE || '100M',
+			videoThreadQueue: process.env.FFMPEG_VIDEO_THREAD_QUEUE_SIZE || '2048',
+			audioThreadQueue: process.env.FFMPEG_AUDIO_THREAD_QUEUE_SIZE || '512',
+		};
+		return profile;
+	}
 
 	/**
 	 * Get the correct audio source for the current scene
@@ -82,10 +103,21 @@ export class OBSManager {
 		this.obs.on('ConnectionClosed', () => {
 			console.log('OBS WebSocket disconnected');
 			this.isConnected = false;
-			// If we're actively streaming, OBS crash/disconnect is a recoverable failure
-			if (this.onStreamFailure) {
-				console.warn('🚨 OBS disconnected during stream - triggering recovery');
-				this.onStreamFailure('obs');
+			// If we're actively streaming, try quick reconnect before failing the stream.
+			if (this.onStreamFailure && this.ffmpegProcess && !this.recoveringObsDisconnect) {
+				this.recoveringObsDisconnect = true;
+				void (async () => {
+					try {
+						console.warn('🚨 OBS disconnected during stream - attempting reconnect');
+						await this.connectWithRetry(3, 1000);
+						console.log('✅ OBS WebSocket reconnected after transient disconnect');
+					} catch {
+						console.warn('🚨 OBS reconnect failed - triggering stream recovery');
+						this.onStreamFailure?.('obs');
+					} finally {
+						this.recoveringObsDisconnect = false;
+					}
+				})();
 			}
 		});
 
@@ -114,12 +146,14 @@ export class OBSManager {
 				console.log(`✅ OBS WebSocket connected successfully on attempt ${attempt}`);
 				return; // Success, exit the retry loop
 			} catch (error) {
-				const errorMessage = error instanceof Error ? error.message : String(error);
+				const errorCode = (error as any)?.code ? ` [code ${(error as any).code}]` : '';
+				const rawMessage = error instanceof Error ? error.message : String(error);
+				const errorMessage = (rawMessage && rawMessage.trim()) ? rawMessage : 'No error message provided by OBS';
 				console.warn(`WebSocket connection attempt ${attempt}/${maxRetries} failed:`, errorMessage);
 
 				if (attempt === maxRetries) {
 					// This was the last attempt, throw the error
-					throw new Error(`Failed to connect to OBS WebSocket after ${maxRetries} attempts: ${errorMessage}`);
+					throw new Error(`Failed to connect to OBS WebSocket after ${maxRetries} attempts: ${errorMessage}${errorCode}`);
 				}
 
 				// Wait before retrying
@@ -290,6 +324,25 @@ export class OBSManager {
 		});
 	}
 
+	private async restartOBSProcess(sceneName: string): Promise<void> {
+		console.warn('Attempting hard OBS restart (kill + relaunch) to recover websocket');
+		try {
+			const { spawn } = require('child_process');
+			spawn('taskkill', ['/f', '/im', 'obs64.exe'], { stdio: 'ignore' });
+		} catch {
+			// best-effort
+		}
+		await new Promise(resolve => setTimeout(resolve, 2500));
+		this.launchedObsPid = null;
+		this.ownsOBSProcess = false;
+		await this.launchOBSProcess(sceneName);
+		console.log('Waiting 10 seconds for OBS to initialize after restart...');
+		await new Promise(resolve => setTimeout(resolve, 10000));
+		await this.connectWithRetry(20, 1000);
+		await this.setCurrentScene(sceneName);
+		await this.ensureVirtualCameraStarted();
+	}
+
 	async disconnect(): Promise<void> {
 		if (this.isConnected) {
 			await this.obs.disconnect();
@@ -339,32 +392,38 @@ export class OBSManager {
 				try {
 					await this.connectWithRetry(15, 1000);
 				} catch (error) {
-					const rawMessage = error instanceof Error ? error.message : String(error);
-					const errorKind = this.classifyOBSConnectionError(rawMessage);
-					const portReachable = await this.isOBSWebSocketPortReachable();
-					const code = this.getAttachErrorCode(errorKind, portReachable);
-					let likelyCause = 'OBS WebSocket is configured differently than the agent.';
-					if (errorKind === 'auth') {
-						likelyCause = 'OBS WebSocket password does not match OBS_PASSWORD.';
-					} else if (!portReachable || errorKind === 'refused') {
-						likelyCause = 'OBS WebSocket server is disabled or OBS is listening on a different port.';
+					// Last-resort recovery for broken OBS websocket state on a running process.
+					try {
+						await this.restartOBSProcess(sceneName);
+						return;
+					} catch (restartError) {
+						const rawMessage = restartError instanceof Error ? restartError.message : String(restartError);
+						const errorKind = this.classifyOBSConnectionError(rawMessage);
+						const portReachable = await this.isOBSWebSocketPortReachable();
+						const code = this.getAttachErrorCode(errorKind, portReachable);
+						let likelyCause = 'OBS WebSocket is configured differently than the agent.';
+						if (errorKind === 'auth') {
+							likelyCause = 'OBS WebSocket password does not match OBS_PASSWORD.';
+						} else if (!portReachable || errorKind === 'refused') {
+							likelyCause = 'OBS WebSocket server is disabled or OBS is listening on a different port.';
+						}
+						const guidance = [
+							`OBS process is running, but agent could not attach to ws://${this.config.host}:${this.config.port}.`,
+							`Likely cause: ${likelyCause}`,
+							`Check OBS > Tools > WebSocket Server Settings and verify port/password match OBS_PORT/OBS_PASSWORD.`,
+							`Port reachable from agent: ${portReachable ? 'yes' : 'no'}.`,
+							`Last error: ${rawMessage}`,
+						].join(' ');
+						console.error('OBS attach diagnostic:', {
+							host: this.config.host,
+							port: this.config.port,
+							passwordConfigured: !!this.config.password,
+							portReachable,
+							errorKind,
+							rawMessage,
+						});
+						throw new OBSManagerError(code, guidance);
 					}
-					const guidance = [
-						`OBS process is running, but agent could not attach to ws://${this.config.host}:${this.config.port}.`,
-						`Likely cause: ${likelyCause}`,
-						`Check OBS > Tools > WebSocket Server Settings and verify port/password match OBS_PORT/OBS_PASSWORD.`,
-						`Port reachable from agent: ${portReachable ? 'yes' : 'no'}.`,
-						`Last error: ${rawMessage}`,
-					].join(' ');
-					console.error('OBS attach diagnostic:', {
-						host: this.config.host,
-						port: this.config.port,
-						passwordConfigured: !!this.config.password,
-						portReachable,
-						errorKind,
-						rawMessage,
-					});
-					throw new OBSManagerError(code, guidance);
 				}
 				this.ownsOBSProcess = false;
 				await this.setCurrentScene(sceneName);
@@ -580,31 +639,35 @@ export class OBSManager {
 		console.log(`🎵 About to get audio source. Current scene: "${this.currentScene}", isConnected: ${this.isConnected}`);
 		const audioSource = this.getAudioSourceForScene();
 		console.log(`🎵 Using audio source for scene ${this.currentScene}: ${audioSource}`);
+		const profile = this.getStreamingProfile();
+		console.log('🎛️ Streaming profile:', profile);
 
 		const ffmpegArgs = [
 			'-f', 'dshow',
-			'-rtbufsize', '1000M',
+			'-thread_queue_size', profile.videoThreadQueue,
+			'-rtbufsize', profile.videoInputBuffer,
 			'-pix_fmt', 'yuv420p',
 			'-i', 'video=OBS Virtual Camera',
 			'-itsoffset', '1.35',
 			'-f', 'dshow',
-			'-rtbufsize', '100M',
+			'-thread_queue_size', profile.audioThreadQueue,
+			'-rtbufsize', profile.audioInputBuffer,
 			'-i', `audio=${audioSource}`,
 			'-map', '0:v',
 			'-map', '1:a',
 			'-af', 'volume=5dB',
 			'-ac', '2',
-			'-c:v', 'hevc_amf',
-			'-rc', 'cqp',
-			'-q', '20',
-			'-b:v', '15000k',
-			'-maxrate', '20000k',
-			'-bufsize', '45000k',
-			'-vf', 'scale=1920:1080,format=yuv420p',
+			'-c:v', profile.videoCodec,
+			'-rc', profile.videoRateControl,
+			'-q', profile.videoQ,
+			'-b:v', profile.videoBitrate,
+			'-maxrate', profile.videoMaxrate,
+			'-bufsize', profile.videoBufsize,
+			'-vf', profile.videoFilter,
 			'-c:a', 'aac',
-			'-b:a', '128k',
-			'-g', '120',
-			'-r', '60',
+			'-b:a', profile.audioBitrate,
+			'-g', profile.gop,
+			'-r', profile.fps,
 			'-f', 'flv',
 			`rtmp://a.rtmp.youtube.com/live2/${streamConfig.streamKey}`
 		];
@@ -632,8 +695,25 @@ export class OBSManager {
 		}
 
 		if (this.ffmpegProcess?.stderr) {
+			let droppedFrameWarnings = 0;
+			let lastDroppedSummaryAt = 0;
 			this.ffmpegProcess.stderr.on('data', (data: Buffer) => {
 				const output = data.toString();
+				const isDroppedFrameSpam =
+					output.includes('real-time buffer [OBS Virtual Camera]') &&
+					output.includes('frame dropped');
+				if (isDroppedFrameSpam) {
+					droppedFrameWarnings += 1;
+					const now = Date.now();
+					if (now - lastDroppedSummaryAt > 5000) {
+						lastDroppedSummaryAt = now;
+						console.warn(`FFmpeg input buffer pressure on OBS Virtual Camera (warnings=${droppedFrameWarnings}).`);
+					}
+					return;
+				}
+				if (output.includes('Last message repeated')) {
+					return;
+				}
 				console.log('FFmpeg stderr:', output);
 
 				// Check for specific error messages
