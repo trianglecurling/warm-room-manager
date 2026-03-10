@@ -22,6 +22,7 @@ const RESTART_EVENT_CLEAR_STATUSES = new Set(['RUNNING', 'STOPPED', 'FAILED', 'D
 const normalizeAgent = (agent: any): OrchestratorAgent => ({
   id: agent.id,
   name: agent.name,
+  version: agent.version || 'unknown',
   state: agent.state,
   currentJobId: agent.currentJobId,
   lastSeenAt: agent.lastSeenAt,

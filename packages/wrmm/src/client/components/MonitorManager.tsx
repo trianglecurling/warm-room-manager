@@ -344,6 +344,13 @@ export const MonitorManager = () => {
     }
   };
 
+  const shortAgentVersion = (version?: string): string | null => {
+    if (!version || version === 'unknown') return null;
+    const cleaned = version.trim();
+    if (!cleaned) return null;
+    return cleaned.length <= 4 ? cleaned : cleaned.slice(-4);
+  };
+
   const getErrorHint = (errorCode?: string): string | null => {
     switch (errorCode) {
       case 'OBS_WS_AUTH_MISMATCH':
@@ -407,6 +414,7 @@ export const MonitorManager = () => {
       id: agent.id,
       name: agent.name,
       status: agent.state,
+      versionShort: shortAgentVersion(agent.version),
       assignedStreamKey: orchestratorJobs.find(job => job.id === agent.currentJobId)?.inlineConfig?.streamKey as StreamKey | undefined,
       }))
       .sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' }));
@@ -3809,7 +3817,12 @@ export const MonitorManager = () => {
                   return (
                     <div key={a.id || `agent-${idx}`} className="border rounded-md p-3">
                       <div className="flex items-center justify-between">
-                        <div className="font-medium text-gray-800">{a.name}</div>
+                        <div className="font-medium text-gray-800">
+                          {a.name}
+                          {a.versionShort && (
+                            <div className="text-[10px] font-normal text-gray-500 leading-tight">v-{a.versionShort}</div>
+                          )}
+                        </div>
                         <span className={`inline-block w-2.5 h-2.5 rounded-full ${
                           a.status === 'RUNNING' ? 'bg-green-500' :
                           a.status === 'IDLE' ? 'bg-gray-300' :

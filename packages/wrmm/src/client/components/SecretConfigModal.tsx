@@ -17,10 +17,12 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
   const [streamVisibility, setStreamVisibility] = useState<'public' | 'unlisted'>('unlisted');
   const [isUpdating, setIsUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [oauthState, setOauthState] = useState<OAuthPanelState>({ loading: true });
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [agents, setAgents] = useState<OrchestratorAgent[]>([]);
   const [loadingAgents, setLoadingAgents] = useState(true);
+  const [updatingAgents, setUpdatingAgents] = useState(false);
   const [allowAllYoutubeAccounts, setAllowAllYoutubeAccounts] = useState(false);
   const [loadingAllowAll, setLoadingAllowAll] = useState(true);
   const [updatingAllowAll, setUpdatingAllowAll] = useState(false);
@@ -129,6 +131,35 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
       console.error('Failed to update allow-all-youtube-accounts:', err);
     } finally {
       setUpdatingAllowAll(false);
+    }
+  };
+
+  const handleUpdateAllAgents = async () => {
+    const agentCount = agents.length;
+    if (agentCount === 0) {
+      setError('No agents connected to update.');
+      return;
+    }
+    if (!confirm(`Update all ${agentCount} streaming agent(s)? This will stop and relaunch each agent process.`)) {
+      return;
+    }
+
+    setUpdatingAgents(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const result = await apiClient.updateAllAgents('Update all agents requested from secret configuration dialog');
+      const successCount = result.results.filter(r => r.success).length;
+      const failureCount = result.results.filter(r => !r.success).length;
+      if (failureCount > 0) {
+        setError(`Update started for ${successCount} agent(s), ${failureCount} failed to receive command.`);
+      } else {
+        setSuccess(`Update commands sent to all ${successCount} agent(s). They may briefly appear offline while restarting.`);
+      }
+    } catch (err: any) {
+      setError(`Failed to update agents: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setUpdatingAgents(false);
     }
   };
 
@@ -243,6 +274,29 @@ export const SecretConfigModal: React.FC<SecretConfigModalProps> = ({ onClose })
                   )}
                 </div>
               </div>
+            )}
+          </div>
+
+          <div className="border-t border-gray-200 pt-4">
+            <h3 className="text-sm font-medium text-gray-700 mb-3">Streaming Agent Update</h3>
+            <p className="text-xs text-gray-500 mb-3">
+              Runs remote update commands on all connected agents (kill current process, pull latest main, build, restart).
+            </p>
+            <button
+              onClick={handleUpdateAllAgents}
+              disabled={loadingAgents || updatingAgents || agents.length === 0}
+              className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {updatingAgents ? 'Sending update commands...' : `Update All Agents (${agents.length})`}
+            </button>
+            {loadingAgents && (
+              <p className="mt-2 text-xs text-blue-600">Loading agents...</p>
+            )}
+            {!loadingAgents && agents.length === 0 && (
+              <p className="mt-2 text-xs text-amber-600">No connected agents found.</p>
+            )}
+            {success && (
+              <p className="mt-2 text-xs text-green-600">{success}</p>
             )}
           </div>
 

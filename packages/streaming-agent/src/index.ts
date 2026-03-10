@@ -2,6 +2,7 @@ import "dotenv/config";
 import { WebSocket } from "ws";
 import { hostname } from "os";
 import { randomUUID } from "crypto";
+import { execSync } from "child_process";
 import { WSMessage, Msg, JobStatus, AgentState, StreamMetadata } from "@warm-room-manager/shared";
 import { OBSManager } from "./obs-manager";
 
@@ -13,7 +14,22 @@ if (/^\d+$/.test(AGENT_ID)) {
     AGENT_ID = `agent-${hostname()}`;
 }
 const AGENT_NAME = process.env.AGENT_NAME || hostname();
-const VERSION = "0.1.0";
+function resolveAgentVersion(): string {
+	const explicit = process.env.AGENT_VERSION || process.env.AGENT_COMMIT_SHA;
+	if (explicit && explicit.trim()) return explicit.trim();
+	try {
+		const sha = execSync('git rev-parse --short=8 HEAD', {
+			cwd: process.cwd(),
+			stdio: ['ignore', 'pipe', 'ignore']
+		}).toString().trim();
+		if (sha) return sha;
+	} catch {
+		// Fall through to default.
+	}
+	return "unknown";
+}
+
+const VERSION = resolveAgentVersion();
 
 console.log(`Agent starting with ID: ${AGENT_ID}, Name: ${AGENT_NAME}, Hostname: ${hostname()}`);
 console.log(`AGENT_ID env var: ${process.env.AGENT_ID ? `"${process.env.AGENT_ID}"` : 'not set'}`);

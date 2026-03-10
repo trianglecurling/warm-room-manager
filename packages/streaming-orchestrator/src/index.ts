@@ -1558,12 +1558,17 @@ app.post<{ Params: { id: string } }>("/v1/agents/:id/release-reservation", async
 	return reply.code(200).send({ ok: true, agent: toPublicAgent(a) });
 });
 
-// Helper function to reboot a single agent via SSH
-async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ success: boolean; agentId: string; agentName: string; host: string; error?: string }> {
+type AgentSshActionResult = { success: boolean; agentId: string; agentName: string; host: string; error?: string };
+
+// Helper function to run a command on a single agent via SSH
+async function executeAgentSshAction(
+	agent: AgentNode,
+	command: string,
+	actionLabel: string
+): Promise<AgentSshActionResult> {
 	// Get SSH configuration from environment variables
 	const sshUser = process.env.AGENT_SSH_USER || 'Administrator';
 	const sshKeyPath = process.env.AGENT_KEY_PATH;
-	const rebootCommand = process.env.AGENT_REBOOT_COMMAND || 'shutdown /r /f /t 0';
 	
 	// Get SSH host from agent's remote address (stored when WebSocket connects)
 	// Fallback to AGENT_SSH_HOST env var or agent name
@@ -1579,7 +1584,7 @@ async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ su
 		};
 	}
 
-	console.log(`🔄 Attempting SSH reboot for agent ${agent.id} (${agent.name}) at ${sshHost}`);
+	console.log(`🔄 Attempting SSH ${actionLabel} for agent ${agent.id} (${agent.name}) at ${sshHost}`);
 
 	try {
 		// Normalize key path for Windows
@@ -1599,6 +1604,7 @@ async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ su
 				normalizedKeyPath = rawKeyPath.replace(/\\/g, '/');
 			}
 		}
+		const escapedRemoteCommand = command.replace(/"/g, '\\"');
 		
 		// Build SSH command
 		let sshCommand: string;
@@ -1607,9 +1613,9 @@ async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ su
 			const escapedKeyPath = normalizedKeyPath.replace(/"/g, '\\"');
 			// Use additional SSH options to force key authentication and prevent password prompts
 			// If key auth fails, SSH will error instead of prompting for password
-			sshCommand = `ssh -i "${escapedKeyPath}" -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey ${sshUser}@${sshHost} "${rebootCommand}"`;
+			sshCommand = `ssh -i "${escapedKeyPath}" -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey ${sshUser}@${sshHost} "${escapedRemoteCommand}"`;
 		} else {
-			sshCommand = `ssh -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${rebootCommand}"`;
+			sshCommand = `ssh -o StrictHostKeyChecking=no ${sshUser}@${sshHost} "${escapedRemoteCommand}"`;
 		}
 
 		// Log command with key path masked for security
@@ -1623,14 +1629,14 @@ async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ su
 			console.log(`No SSH key specified, using default SSH keys`);
 		}
 
-		// Execute SSH command (don't wait for completion since machine will reboot)
+		// Execute SSH command (don't wait for completion)
 		execAsync(sshCommand).catch((error) => {
-			// It's normal for SSH to fail when the machine reboots, but log other errors
+			// It's normal for SSH to fail when the remote command closes the session abruptly.
 			if (error.message && !error.message.includes('Connection closed') && !error.message.includes('closed by remote host')) {
-				console.error(`SSH command error for agent ${agent.name}:`, error.message);
+				console.error(`SSH ${actionLabel} command error for agent ${agent.name}:`, error.message);
 				console.error(`Full error:`, error);
 			} else {
-				console.log(`SSH command executed for agent ${agent.name} (connection closed due to reboot)`);
+				console.log(`SSH ${actionLabel} command executed for agent ${agent.name} (connection closed by remote host)`);
 			}
 		});
 
@@ -1641,7 +1647,7 @@ async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ su
 			host: sshHost
 		};
 	} catch (error) {
-		console.error(`Failed to reboot agent ${agent.name} via SSH:`, error);
+		console.error(`Failed to run SSH ${actionLabel} for agent ${agent.name}:`, error);
 		return {
 			success: false,
 			agentId: agent.id,
@@ -1650,6 +1656,31 @@ async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<{ su
 			error: error instanceof Error ? error.message : 'Unknown error'
 		};
 	}
+}
+
+// Helper function to reboot a single agent via SSH
+async function rebootAgentViaSSH(agent: AgentNode, reason: string): Promise<AgentSshActionResult> {
+	const rebootCommand = process.env.AGENT_REBOOT_COMMAND || 'shutdown /r /f /t 0';
+	console.log(`🔄 Reboot requested for ${agent.name}: ${reason}`);
+	return executeAgentSshAction(agent, rebootCommand, 'reboot');
+}
+
+// Helper function to update a single agent via SSH
+async function updateAgentViaSSH(agent: AgentNode, reason: string): Promise<AgentSshActionResult> {
+	const defaultUpdateCommand =
+		`powershell -NoProfile -ExecutionPolicy Bypass -Command ` +
+		`"$ErrorActionPreference='Stop'; ` +
+		`$agentDir='C:\\dev\\warm-room-manager\\packages\\streaming-agent'; ` +
+		`Get-CimInstance Win32_Process -Filter \\\"Name = 'node.exe'\\\" | ` +
+		`Where-Object { $_.CommandLine -and $_.CommandLine -like '*packages\\\\streaming-agent*' } | ` +
+		`ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; ` +
+		`Set-Location $agentDir; ` +
+		`git pull origin main; ` +
+		`npm run build; ` +
+		`Start-Process -FilePath 'npm' -ArgumentList 'start' -WorkingDirectory $agentDir"`;
+	const updateCommand = process.env.AGENT_UPDATE_COMMAND || defaultUpdateCommand;
+	console.log(`⬆️ Update requested for ${agent.name}: ${reason}`);
+	return executeAgentSshAction(agent, updateCommand, 'update');
 }
 
 app.post<{
@@ -1722,6 +1753,74 @@ app.post<{
 		ok: true,
 		message: `Reboot commands sent to ${successCount} agent(s), ${failureCount} failed`,
 		results: rebootResults
+	});
+});
+
+app.post<{
+	Params: { id: string };
+	Body: { reason?: string };
+}>("/v1/agents/:id/update", async (req, reply) => {
+	const agentId = req.params.id;
+	const a = agents.get(agentId);
+	if (!a) return reply.code(404).send({ error: "Agent not found" });
+
+	const reason = req.body.reason || 'Agent update requested from UI';
+	const result = await updateAgentViaSSH(a, reason);
+	if (!result.success) {
+		return reply.code(500).send({
+			error: "Failed to execute SSH update",
+			message: result.error || 'Unknown error'
+		});
+	}
+
+	return reply.code(202).send({
+		ok: true,
+		message: 'Update command sent via SSH',
+		method: 'ssh',
+		host: result.host
+	});
+});
+
+app.post<{
+	Body: { reason?: string };
+}>("/v1/agents/update-all", async (req, reply) => {
+	const reason = req.body.reason || 'Update all agents requested from UI';
+	const agentList = Array.from(agents.values());
+
+	if (agentList.length === 0) {
+		return reply.code(200).send({
+			ok: true,
+			message: 'No agents to update',
+			results: []
+		});
+	}
+
+	console.log(`⬆️ Attempting to update all ${agentList.length} agents`);
+
+	const results = await Promise.allSettled(
+		agentList.map(agent => updateAgentViaSSH(agent, reason))
+	);
+
+	const updateResults = results.map((result, idx) => {
+		if (result.status === 'fulfilled') {
+			return result.value;
+		}
+		return {
+			success: false,
+			agentId: agentList[idx].id,
+			agentName: agentList[idx].name,
+			host: agentList[idx].remoteAddress || agentList[idx].name || 'unknown',
+			error: result.reason?.message || 'Unknown error'
+		};
+	});
+
+	const successCount = updateResults.filter(r => r.success).length;
+	const failureCount = updateResults.filter(r => !r.success).length;
+
+	return reply.code(202).send({
+		ok: true,
+		message: `Update commands sent to ${successCount} agent(s), ${failureCount} failed`,
+		results: updateResults
 	});
 });
 

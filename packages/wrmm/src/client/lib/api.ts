@@ -197,6 +197,7 @@ export interface CreateBroadcastRequest {
 export interface OrchestratorAgent {
   id: string;
   name: string;
+  version: string;
   state: AgentStatus;
   currentJobId: string | null;
   lastSeenAt: string;
@@ -699,6 +700,36 @@ class ApiClient {
       const errorText = await res.text().catch(() => '');
       const errorData = await res.json().catch(() => ({ error: errorText }));
       throw new Error(errorData.error || errorData.message || `Failed to reboot all agents: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async updateAgent(agentId: string, reason?: string): Promise<{ ok: boolean; message: string; method?: string; host?: string }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/agents/${agentId}/update`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      const errorData = await res.json().catch(() => ({ error: errorText }));
+      throw new Error(errorData.error || errorData.message || `Failed to update agent: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async updateAllAgents(reason?: string): Promise<{ ok: boolean; message: string; results: Array<{ success: boolean; agentId: string; agentName: string; host: string; error?: string }> }> {
+    const url = `${ORCHESTRATOR_BASE_URL}/v1/agents/update-all`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => '');
+      const errorData = await res.json().catch(() => ({ error: errorText }));
+      throw new Error(errorData.error || errorData.message || `Failed to update all agents: ${res.status} ${res.statusText}`);
     }
     return res.json();
   }
