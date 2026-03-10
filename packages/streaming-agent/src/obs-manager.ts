@@ -193,6 +193,15 @@ export class OBSManager {
 	private async ensureVirtualCameraStarted(): Promise<void> {
 		if (!this.isConnected) return;
 		try {
+			const status = await this.obs.call('GetVirtualCamStatus') as { outputActive?: boolean };
+			if (status?.outputActive) {
+				console.log('Virtual camera already active');
+				return;
+			}
+		} catch {
+			// Some OBS versions/plugins may not support status query; fallback to start call below.
+		}
+		try {
 			await this.obs.call('StartVirtualCam');
 			console.log('Virtual camera started successfully');
 		} catch (error: any) {
@@ -202,12 +211,18 @@ export class OBSManager {
 				msg.toLowerCase().includes('virtual') &&
 				msg.toLowerCase().includes('camera');
 			const unsupported = error?.code === 501;
+			// OBS sometimes returns generic 500 for "already active" or startup race conditions.
+			const transient500 = error?.code === 500;
 			if (alreadyRunning) {
 				console.log('Virtual camera already running');
 				return;
 			}
 			if (unsupported) {
 				console.log('StartVirtualCam not supported by this OBS version; relying on OBS launch flags');
+				return;
+			}
+			if (transient500) {
+				console.warn('StartVirtualCam returned OBS 500; continuing (virtual camera may already be active):', msg);
 				return;
 			}
 			throw error;
@@ -295,6 +310,12 @@ export class OBSManager {
 
 		if (this.startOBSPromise) {
 			await this.startOBSPromise;
+			// Another caller may have started OBS for a different stream.
+			// Re-apply requested scene for this call before continuing.
+			if (this.isConnected) {
+				await this.setCurrentScene(sceneName);
+				await this.ensureVirtualCameraStarted();
+			}
 			return;
 		}
 

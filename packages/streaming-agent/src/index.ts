@@ -14,9 +14,9 @@ if (/^\d+$/.test(AGENT_ID)) {
     AGENT_ID = `agent-${hostname()}`;
 }
 const AGENT_NAME = process.env.AGENT_NAME || hostname();
-function resolveAgentVersion(): string {
-	const explicit = process.env.AGENT_VERSION || process.env.AGENT_COMMIT_SHA;
-	if (explicit && explicit.trim()) return explicit.trim();
+function resolveGitCommitSha(): string | null {
+	const explicitSha = process.env.AGENT_COMMIT_SHA;
+	if (explicitSha && explicitSha.trim()) return explicitSha.trim();
 	try {
 		const sha = execSync('git rev-parse --short=8 HEAD', {
 			cwd: process.cwd(),
@@ -26,7 +26,15 @@ function resolveAgentVersion(): string {
 	} catch {
 		// Fall through to default.
 	}
-	return "unknown";
+	return null;
+}
+
+function resolveAgentVersion(): string {
+	const baseVersion = (process.env.AGENT_VERSION || "0.1.0").trim();
+	const sha = resolveGitCommitSha();
+	if (!sha) return baseVersion;
+	// Always include commit SHA in reported version so UI can surface exact deployed revision.
+	return `${baseVersion}+${sha}`;
 }
 
 const VERSION = resolveAgentVersion();
