@@ -1,6 +1,8 @@
 import { OBSWebSocket } from 'obs-websocket-js';
 import { ChildProcess } from 'child_process';
 import { Socket } from 'net';
+import { existsSync, rmSync } from 'fs';
+import { join } from 'path';
 
 export interface OBSConfig {
 	host: string;
@@ -268,6 +270,7 @@ export class OBSManager {
 		const { spawn } = require('child_process');
 		const obsDir = obsPath.includes('\\') ? obsPath.substring(0, obsPath.lastIndexOf('\\')) : process.cwd();
 		console.log('OBS working directory:', obsDir);
+		this.clearCrashSentinelIfPresent();
 
 		// Deliberately omit --multi to prevent multiple OBS instances.
 		const obsArgs = [
@@ -275,7 +278,6 @@ export class OBSManager {
 			'--collection', 'auto4k',
 			'--scene', sceneName,
 			'--minimize-to-tray',
-			'--disable-shutdown-check',
 			'--disable-updater',
 			'--startvirtualcam'
 		];
@@ -324,15 +326,43 @@ export class OBSManager {
 		});
 	}
 
-	private async restartOBSProcess(sceneName: string): Promise<void> {
-		console.warn('Attempting hard OBS restart (kill + relaunch) to recover websocket');
+	private clearCrashSentinelIfPresent(): void {
+		const appData = process.env.APPDATA;
+		if (!appData) return;
+		const sentinelPath = join(appData, 'obs-studio', '.sentinel');
 		try {
-			const { spawn } = require('child_process');
-			spawn('taskkill', ['/f', '/im', 'obs64.exe'], { stdio: 'ignore' });
+			if (existsSync(sentinelPath)) {
+				rmSync(sentinelPath, { recursive: true, force: true });
+				console.log('Cleared OBS crash sentinel before launch');
+			}
+		} catch (error) {
+			console.warn('Failed to clear OBS crash sentinel:', error);
+		}
+	}
+
+	private async terminateOBSProcess(targetPid?: number): Promise<void> {
+		const { spawn } = require('child_process');
+		const baseArgs = targetPid ? ['/pid', String(targetPid)] : ['/im', 'obs64.exe'];
+		// First attempt graceful close (no /f) so OBS can shut down cleanly.
+		try {
+			spawn('taskkill', [...baseArgs, '/t'], { stdio: 'ignore' });
 		} catch {
-			// best-effort
+			// best effort
 		}
 		await new Promise(resolve => setTimeout(resolve, 2500));
+		const stillRunning = await this.isOBSProcessRunning();
+		if (!stillRunning) return;
+		// Fallback to force kill only if graceful close didn't work.
+		try {
+			spawn('taskkill', ['/f', ...baseArgs, '/t'], { stdio: 'ignore' });
+		} catch {
+			// best effort
+		}
+	}
+
+	private async restartOBSProcess(sceneName: string): Promise<void> {
+		console.warn('Attempting hard OBS restart (kill + relaunch) to recover websocket');
+		await this.terminateOBSProcess();
 		this.launchedObsPid = null;
 		this.ownsOBSProcess = false;
 		await this.launchOBSProcess(sceneName);
@@ -472,11 +502,8 @@ export class OBSManager {
 		// Only force-kill OBS if this manager launched it.
 		if (this.ownsOBSProcess && this.launchedObsPid) {
 			try {
-				const { spawn } = require('child_process');
 				console.log(`Stopping OBS process PID: ${this.launchedObsPid}`);
-				spawn('taskkill', ['/f', '/pid', String(this.launchedObsPid)], {
-					stdio: 'ignore'
-				});
+				await this.terminateOBSProcess(this.launchedObsPid);
 			} catch (error) {
 				console.warn('Failed to kill OBS process by PID:', error);
 			}

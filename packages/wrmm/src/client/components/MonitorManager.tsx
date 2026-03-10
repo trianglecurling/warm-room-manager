@@ -590,25 +590,33 @@ export const MonitorManager = () => {
       shouldRefresh = true;
 
       const streamKey = job.inlineConfig?.streamKey as StreamKey | undefined;
-      if (!streamKey || streamKey === 'vibe') return;
+      if (!streamKey) return;
+
+      // Clear stream form fields on stop/fail/dismiss/cancel so stale metadata is not retained.
+      draftTitlesRef.current[streamKey] = '';
+      draftDescriptionsRef.current[streamKey] = '';
 
       setStreams(prev => {
         const current = prev[streamKey];
-        if (!current || (!current.redTeam && !current.yellowTeam)) return prev;
+        if (!current) return prev;
         return {
           ...prev,
           [streamKey]: {
             ...current,
+            title: '',
+            description: '',
             redTeam: '',
             yellowTeam: '',
           },
         };
       });
 
-      const sheetId = getSheetIdentifier(streamKey);
-      apiClient.updateTeamNames(sheetId, '', '').catch(err => {
-        console.error(`Failed to clear team names for ${streamKey}:`, err);
-      });
+      if (streamKey !== 'vibe') {
+        const sheetId = getSheetIdentifier(streamKey);
+        apiClient.updateTeamNames(sheetId, '', '').catch(err => {
+          console.error(`Failed to clear team names for ${streamKey}:`, err);
+        });
+      }
     });
 
     if (shouldRefresh && now - lastBroadcastRefreshAtRef.current > 3000) {
